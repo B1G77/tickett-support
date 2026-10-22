@@ -1,0 +1,39 @@
+# Support-inbox router. Logs: journalctl -u tickett-router
+[Unit]
+Description=Tickett support-inbox router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=tickett
+Group=tickett
+WorkingDirectory=/opt/tickett-router/current
+EnvironmentFile=/etc/tickett-router/secrets.env
+Environment=ROUTER_LOCAL_CONFIG=/etc/tickett-router/router.local.json
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/tickett-router/venv/bin/python /opt/tickett-router/current/src/router.py --loop
+Restart=always
+RestartSec=30
+
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tickett-router
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

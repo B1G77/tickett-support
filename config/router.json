@@ -1,0 +1,57 @@
+{
+  "_comment": "Non-secret router settings. The IMAP password lives in the macOS Keychain (service below), the API key in ~/.config/claude-secrets/claude.env. Never put either here.",
+  "imap": {
+    "host": "mail.tickett.com",
+    "port": 993,
+    "user": "support@tickett.com",
+    "keychain_service": "tickett-imap",
+    "_note": "Since 19 Oct 2026. Before: atendimento@lebillet.eu on srv6.mychrome.pt (Keychain lebillet-imap), state in ~/lebillet-data/router, kept as practice data. SMTP: same host, port 465."
+  },
+  "model": "claude-opus-5",
+  "text_retention_days": 90,
+  "pricing": {
+    "_note": "Claude list prices in USD per million tokens (cache_write = 5-minute TTL, 1.25x input), from Anthropic's model table cached 2026-10-06. usd_to_eur = 1/1.1539, the ECB reference rate of 15 Sep 2026 (via Banca d'Italia). Update both when prices or the rate change.",
+    "usd_to_eur": 0.8666,
+    "per_million_usd": {
+      "claude-opus-5":   {"in": 5.00, "out": 25.00, "cache_read": 0.50, "cache_write": 6.25},
+      "claude-opus-5-5": {"in": 4.00, "out": 20.00, "cache_read": 0.20, "cache_write": 5.00}
+    }
+  },
+  "folders": {
+    "F1": "1 Cancelamentos e Reembolsos",
+    "F2": "2 Bilhetes não recebidos",
+    "F3": "3 Compra e Pagamento",
+    "F4": "4 Alterações de Reserva",
+    "F5": "5 Informações do Evento",
+    "F6": "6 Loja e Encomendas",
+    "F7": "7 Parceiros e Promotores",
+    "F8": "8 Não-cliente",
+    "F9": "9 A Rever"
+  },
+  "answered_folder": "10 Respondidos",
+  "handoff_folder": "0 Por Responder",
+  "webapp": {"port": 8787, "hosts": [], "secure_cookie": false, "trusted_proxy": false, "_note": "The dashboard (src/webapp.py) listens on 127.0.0.1 only and asks everyone to log in (python3 src/webapp.py --set-password admin|agent). hosts = the server's tailnet name (e.g. tickett-router.tailXXXX.ts.net). secure_cookie = true behind https; trusted_proxy = true to lock out by the X-Forwarded-For address."},
+  "_handoff_note": "Mail a person must answer: refunds Tickett handles, questions the sources cannot answer, legal mail. Follow-ups in those conversations land here too.",
+  "_answered_note": "Mail you reply to (seen in Sent) moves here. Customer follow-ups go back to the conversation's category folder.",
+  "overdue_days": 2,
+  "digest_hour": 8,
+  "drafts": {"enabled": true, "_note": "true = write a reply draft for new customer mail in folders 1-7. Rules in config/rulebook.md."},
+  "urgent_flag": "\\Flagged",
+  "go_live": "immediate",
+  "follow_ups": "inherit_thread_folder",
+  "uncertain_goes_to": "F9",
+  "backfill_since": "2025-09-10",
+  "phishing_retention_days": 30,
+  "phishing_action": "move_to_trash",
+  "brazil_staff_copies": "file_with_customer_case",
+  "poll_seconds": 120,
+  "state_dir": "~/lebillet-data/router-tickett",
+  "route_since": "2026-09-10",
+  "_route_since_note": "The router only touches mail that arrived on or after this date; older mail is filed by the backfill.",
+  "rules": {
+    "_note": "Used when there is no API key. Measured on 360 hand-labelled cases: cancelled-event refunds 98%, merch 95% agreement. Add new cancelled events here.",
+    "cancelled_events": "michael lives forever|rodrigo teaser|diogo nogueira|jogo d[oe]s famosos|tchan|brazilian summer|di prop[óo]sito|melody|psirico|ferro.?gaita|kannalha|chico c[ée]sar|ana beatriz|sa[úu]de mental|baile do atl|tr[êe]s palavrinhas|insufl[áa]veis|pagode 360|qsamba|marvilla|soweto",
+    "refund_words": "reembols|devolu|refund|rembours|cancel|anulad|adiad|estorno|dinheiro|ressarc",
+    "merch_words": "maillot|t-?shirt|tee.?shirt|camisol|yann|casquette|colis|livraison|exp[ée]dition|suivi de commande"
+  }
+}

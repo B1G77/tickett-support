@@ -1,0 +1,18 @@
+# Customer email data — NEVER commit. Contains PII.
+data/
+data
+*.emlx
+*.jsonl
+*.csv
+.env
+__pycache__/
+*.pyc
+.venv/
+
+# Local tool caches (council transcripts etc.)
+.claude/
+.DS_Store
+
+# Dashboard frontend build
+web/node_modules/
+web/dist/
