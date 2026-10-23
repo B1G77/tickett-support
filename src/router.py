@@ -285,8 +285,8 @@ def connect(cfg: dict) -> Mailbox:
 
 
 def build_redactor():
-    from redactor import CASES, MESSAGES, Redactor, load
-    return Redactor(load(MESSAGES), load(CASES))
+    from redactor import build
+    return build()
 
 
 def build_classifier():

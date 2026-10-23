@@ -23,6 +23,8 @@ DATA = Path(__file__).resolve().parent.parent / "data"
 CASES = DATA / "03_cases.jsonl"
 MESSAGES = DATA / "02_triaged.jsonl"
 OUT = DATA / "04_redacted.jsonl"
+# What the redactor learned from the archive (names only), for machines without the archive.
+LEXICON = Path.home() / "lebillet-data" / "redactor.json"
 
 
 def load(path: Path) -> list[dict]:
@@ -61,6 +63,21 @@ class Redactor:
         # only compiles the names that could possibly occur in it.
         self.people = [(n, R.fold(n.split()[0]), R.fold(n.split()[-1])) for n in people]
         self.given = {g for g, c in given.items() if c >= 2}
+
+    @classmethod
+    def from_lexicon(cls, lex: dict) -> "Redactor":
+        red = cls.__new__(cls)
+        red.staff = set(lex["staff"])
+        red.keep = list(lex["keep"])
+        red.keep_rx = (re.compile(r"\b(?:" + "|".join(map(re.escape, red.keep)) + r")\b")
+                       if red.keep else None)
+        red.people = [(n, R.fold(n.split()[0]), R.fold(n.split()[-1])) for n in lex["people"]]
+        red.given = set(lex["given"])
+        return red
+
+    def lexicon(self) -> dict:
+        return {"staff": sorted(self.staff), "keep": list(self.keep), "people": sorted(n for n, _, _ in self.people),
+                "given": sorted(self.given)}
 
     def tokens_for(self, from_names, addresses) -> set[str]:
         tokens = set(self.staff)
@@ -110,7 +127,28 @@ def redact_case(red: "Redactor", c: dict, by_id: dict) -> tuple[dict, Counter, l
     }, counts, leaks
 
 
+def build(lexicon: Path = LEXICON, messages: Path = MESSAGES, cases: Path = CASES) -> Redactor:
+    """From the archive when it is here (the Mac), else from the saved lexicon (the server),
+    else from nothing: the sender's own name and address are still replaced and the leak scan still runs."""
+    if messages.exists() and cases.exists():
+        return Redactor(load(messages), load(cases))
+    if lexicon.exists():
+        return Redactor.from_lexicon(json.loads(lexicon.read_text(encoding="utf-8")))
+    return Redactor([], [])
+
+
+def save_lexicon(red: Redactor, path: Path = LEXICON) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(red.lexicon(), ensure_ascii=False), encoding="utf-8")
+    tmp.chmod(0o600)
+    tmp.replace(path)
+
+
 def main() -> int:
+    if sys.argv[1:] == ["--lexicon"]:
+        save_lexicon(Redactor(load(MESSAGES), load(CASES)))
+        print(f"lexicon written: {LEXICON}", file=sys.stderr)
+        return 0
     for need in (CASES, MESSAGES):
         if not need.exists():
             print(f"missing {need}", file=sys.stderr)

@@ -237,3 +237,20 @@ def test_redact_6_1_residuals():
     assert "Christophe" not in out
     # but an ordinary sentence starting the next line is left alone
     assert run("Cumprimentos Ana Dupont\nObrigado pela ajuda", tokens=("Dupont",)).endswith("Obrigado pela ajuda")
+
+
+def test_the_redactor_works_from_a_saved_lexicon_or_from_nothing(tmp_path):
+    import redactor as RD
+    msgs = [{"from_domain": "gmail.com", "from_name": "Rita Exemplo", "bucket": "customer", "body_text": ""},
+            {"from_domain": "gmail.com", "from_name": "Rita Outra", "bucket": "customer", "body_text": ""}]
+    full = RD.Redactor(msgs, [])
+    lex = tmp_path / "redactor.json"
+    RD.save_lexicon(full, lex)
+    assert oct(lex.stat().st_mode & 0o777) == "0o600"
+    missing = tmp_path / "none.jsonl"
+    again = RD.build(lex, missing, missing)
+    assert again.lexicon() == full.lexicon()
+    text = "Falei com a Rita Exemplo ontem."
+    assert full.redact("", text)[1] == again.redact("", text)[1]
+    bare = RD.build(tmp_path / "absent.json", missing, missing)
+    assert bare.people == [] and "x@example.com" not in bare.redact("", "escreva para x@example.com")[1]
