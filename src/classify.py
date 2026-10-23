@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TAXONOMY = ROOT / "data" / "06_taxonomy_v2.json"
+TAXONOMY = ROOT / "config" / "taxonomy.json"
 MODEL = "claude-opus-5"
 # Server-side refusal fallback: a declined request is re-run on another model.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"

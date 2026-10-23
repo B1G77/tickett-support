@@ -42,3 +42,9 @@ def test_bad_model_output_goes_to_a_rever():
 def test_urgent_definition_is_legal_only():
     system = K.build_request({}, TAX)["system"][0]["text"]
     assert "legal threats" not in system and "an event date" in system
+
+
+def test_the_category_definitions_ship_with_the_code():
+    import json
+    tax = json.loads(K.TAXONOMY.read_text(encoding="utf-8"))
+    assert "config" in K.TAXONOMY.parts and sorted(f["id"] for f in tax["folders"]) == [f"F{i}" for i in range(1, 10)]
