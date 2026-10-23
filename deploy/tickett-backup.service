@@ -1,0 +1,6 @@
+[Unit]
+Description=Tickett support inbox weekly backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tickett-backup

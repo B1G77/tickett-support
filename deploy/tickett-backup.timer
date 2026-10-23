@@ -1,0 +1,9 @@
+[Unit]
+Description=Tickett support inbox weekly backup
+
+[Timer]
+OnCalendar=Sun 03:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

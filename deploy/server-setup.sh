@@ -42,7 +42,11 @@ mv /etc/sudoers.d/tickett-deploy.tmp /etc/sudoers.d/tickett-deploy
 
 install -o root -g root -m 0644 "$HERE/tickett-router.service" /etc/systemd/system/tickett-router.service
 install -o root -g root -m 0644 "$HERE/tickett-webapp.service" /etc/systemd/system/tickett-webapp.service
+install -o root -g root -m 0755 "$HERE/backup.sh" /usr/local/sbin/tickett-backup
+install -o root -g root -m 0644 "$HERE/tickett-backup.service" /etc/systemd/system/tickett-backup.service
+install -o root -g root -m 0644 "$HERE/tickett-backup.timer" /etc/systemd/system/tickett-backup.timer
 systemctl daemon-reload
 systemctl enable tickett-router tickett-webapp >/dev/null
+systemctl enable --now tickett-backup.timer >/dev/null
 
 echo "Done. Next steps are in the deployment document."
