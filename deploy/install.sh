@@ -7,10 +7,9 @@ cd "$(dirname "$0")/.."
 [[ -x /usr/local/sbin/tickett-deploy ]] || { echo "run deploy/server-setup.sh first" >&2; exit 1; }
 SHA=$(git rev-parse HEAD)
 
-if [[ ! -f web/dist/index.html ]]; then
-  command -v npm >/dev/null || { echo "build the dashboard first (cd web && npm ci && npm run build), or install Node 22" >&2; exit 1; }
-  (cd web && npm ci && npm run build)
-fi
+command -v npm >/dev/null || { echo "install Node 22 to build the dashboard" >&2; exit 1; }
+rm -rf web/dist
+(cd web && npm ci && npm run build)
 
 git archive --format=tar -o /tmp/release.tar "$SHA"
 tar --append -f /tmp/release.tar web/dist
