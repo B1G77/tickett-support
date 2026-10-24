@@ -90,3 +90,13 @@ def test_the_events_document_check_reports_freshness():
     doc = next(c for c in DB.checks(d, NOW) if c[1] == "Documento de eventos")
     assert doc == ("good", "Documento de eventos", "lido há 10 min: 15 respostas gerais, 14 eventos (8 ainda vazios)")
     assert not any(c[1] == "Energia" for c in DB.checks({**d, "system": {"on_battery": None}}, NOW))   # a server
+
+
+def test_a_customer_summary_mentioning_an_error_is_not_a_problem(tmp_path):
+    t = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+    cfg = setup(tmp_path, [
+        f"{t}  <a@x>  3 Compra e Pagamento urgent=False via claude/high: Transaction failed at checkout, error page",
+        f"{t}  <b@x>  2 Bilhetes não recebidos urgent=False via claude/high: tickets never arrived; asks for resend",
+        f"{t}  site  crawl failed, keeping the previous facts (TimeoutError)"])
+    d = DB.collect(cfg, now=datetime.now(timezone.utc), system=OK_SYSTEM)
+    assert d["problems_24h"] == [("crawl failed, keeping the previous facts (TimeoutError)", 1)]
