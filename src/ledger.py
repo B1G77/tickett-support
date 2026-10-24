@@ -22,7 +22,7 @@ import drafts as DR
 import events_doc as ED
 import triage as T
 
-COUNTED = ("F1", "F2", "F3", "F4", "F5", "F6", "F7", "F9", "P")
+COUNTED = ("F1", "F2", "F3", "F4", "F5", "F9", "P")
 MAX_TEXT = 20000
 SENDER_DAYS = 7   # replies.from_email: no longer needed after a week
 SKIP_WORDS = {"dr", "dra", "the", "and", "de", "do", "da", "dos", "das", "e", "o", "a"}
@@ -229,6 +229,7 @@ def after_cycle(state, cfg: dict, log) -> None:
     try:
         backfill(state)
         backfill_usage(state)
+        DR.adopt_handoffs(state)   # old open hand-offs show as (empty) draft cards
         day = datetime.now().astimezone().date().isoformat()
         row = state.db.execute("SELECT value FROM meta WHERE key='purge_day'").fetchone()
         if row and row[0] == day:

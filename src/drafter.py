@@ -32,7 +32,7 @@ LANGS = ["pt-PT", "pt-BR", "fr", "en", "es", "de", "nl"]
 MAX_TEXT = 8000
 MAX_TERMS = 40000
 MAX_DOC = 30000
-HANDOFF_REASONS = ["", "tickett_refund", "no_answer_in_sources", "person_must_act"]
+FLAGS = ["", "tickett_refund", "no_answer_in_sources", "person_must_act"]   # the router adds legal and relayed
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -42,11 +42,9 @@ SCHEMA = {
         "action_note": {"type": "string"},
         "missing_facts": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-        "handoff": {"type": "boolean"},
-        "handoff_reason": {"type": "string", "enum": HANDOFF_REASONS},
+        "flag": {"type": "string", "enum": FLAGS},
     },
-    "required": ["reply", "language", "needs_action", "action_note", "missing_facts", "confidence", "handoff",
-                 "handoff_reason"],
+    "required": ["reply", "language", "needs_action", "action_note", "missing_facts", "confidence", "flag"],
     "additionalProperties": False,
 }
 
@@ -66,12 +64,11 @@ def system_prompt(rulebook: str, terms: str, doc: str = "") -> str:
         "- Personal data was replaced by placeholders such as [NAME] or [ORDER_REF]. Never write a placeholder "
         "in the reply; say 'a sua reserva' or similar instead.",
         "- State only facts found in the three sources or the rulebook. Never guess.",
-        "- missing_facts: empty, unless a fact the reply needs is missing from the sources (then hand off instead). "
-        "Details you ask the customer for (event, order number, proof) are not missing facts.",
-        "- handoff: true when the rulebook's hand-off rules apply (refund handled by Tickett, no answer in the "
-        "sources, a person must act); then give the reason, leave reply empty and say in action_note, in European "
-        "Portuguese and in one line, what the team needs to do or know. Otherwise handoff is false and "
-        "handoff_reason is \"\".",
+        "- missing_facts: empty, unless a fact the reply needs is missing from the sources (then also set flag "
+        "no_answer_in_sources). Details you ask the customer for (event, order number, proof) are not missing facts.",
+        "- Always write a reply. flag: the rulebook's flag when one applies (tickett_refund, no_answer_in_sources, "
+        "person_must_act), otherwise \"\". With person_must_act, action_note says in European Portuguese and in "
+        "one line what the team needs to do.",
         "- needs_action is true when a person must do something (attach a PDF, check a payment, resend a ticket, "
         "contact the promoter); action_note says what, in European Portuguese, in one line.",
         "- confidence is low when the request is unclear or the rulebook does not cover it.",
@@ -116,13 +113,11 @@ def parse_response(resp) -> dict | None:
         return None
     if not isinstance(out, dict):
         return None
-    out.setdefault("handoff", False)
-    if out["handoff"]:
-        out["handoff_reason"] = out.get("handoff_reason") or "no_answer_in_sources"
-        out["reply"] = ""
-        return out
     if not str(out.get("reply", "")).strip():
         return None
+    out["flag"] = out.get("flag") or ""
+    if out["flag"] not in FLAGS:   # not one we know: treat it as unconfirmed, so nothing goes out on its own
+        out["flag"] = "no_answer_in_sources"
     if out.get("language") not in LANGS:
         out["language"] = "pt-PT"
     out.setdefault("missing_facts", [])
@@ -138,6 +133,7 @@ SIGNATURE = {"pt-PT": "Com os melhores cumprimentos,\nEquipa Tickett",
              "es": "Saludos cordiales,\nEquipo Tickett", "de": "Mit freundlichen Grüßen\nTeam Tickett",
              "nl": "Met vriendelijke groet,\nTeam Tickett"}
 NOTE = "▶ NOTA INTERNA (apagar antes de enviar): "
+RELAYED = "Email reencaminhado: confirme o endereço do cliente em Para: antes de enviar."
 _PLACEHOLDER = re.compile(r"\[[A-Z_]+\]")
 
 
@@ -157,8 +153,8 @@ def compose(out: dict, name: str) -> tuple[str, str, str]:
     lang = out["language"]
     greeting = f"{GREETING[lang]} {name}," if name else f"{GREETING[lang]},"
     body = f"{greeting}\n\n{out['reply'].strip()}\n\n{SIGNATURE[lang]}"
-    notes = []
-    if out.get("needs_action"):
+    notes = [RELAYED] if out.get("flag") == "relayed" else []   # the reply would go to the partner or the form
+    if out.get("needs_action") or out.get("flag") == "person_must_act":
         action = out.get("action_note", "").strip()
         notes.append(action if action else "ação necessária (sem descrição)")
     notes += [f"falta: {f}" for f in out.get("missing_facts", []) if f]
@@ -171,11 +167,16 @@ def compose(out: dict, name: str) -> tuple[str, str, str]:
     return (f"{NOTE}{note}\n\n{body}" if note else body), body, note
 
 
-def reply_message(rec: dict, text: str, user: str) -> tuple[bytes, str]:
+def reply_message(rec: dict, text: str, user: str, bcc: str = "", to: str = "") -> tuple[bytes, str]:
+    """The reply as a message, to `to` when given (relayed mail: the customer's address in Para:), else the
+    Reply-To or the sender. A `bcc` is a header here, for Drafts and Sent; actions.smtp_send puts it in the
+    envelope and takes it off the customer's copy."""
     m = EmailMessage()
     m["From"] = f"Tickett <{user}>"
-    m["To"] = parseaddr(rec.get("reply_to", ""))[1] or rec.get("from_email", "")
+    m["To"] = to or parseaddr(rec.get("reply_to", ""))[1] or rec.get("from_email", "")
     subject = rec.get("subject", "").strip()
+    if bcc:
+        m["Bcc"] = bcc
     m["Subject"] = subject if re.match(r"(?i)re:", subject) else f"Re: {subject}"
     parent = rec.get("message_id", "")
     if parent:
@@ -239,7 +240,7 @@ def preview(n: int, seed: int = 7) -> None:
                 sent_for.setdefault(ref, s)
     pool = [r for r in _jsonl(data / "04_redacted.jsonl")
             if r.get("send_ok") and (lab := labels.get(r["case_id"]))
-            and lab["folder"] in ("F1", "F2", "F3", "F4", "F5", "F6", "F7")
+            and lab["folder"] in ("F1", "F2", "F3", "F4", "F5")
             and not lab["urgent"] and lab.get("reply") != "N"]
     random.Random(seed).shuffle(pool)
     d = Drafter()
@@ -251,10 +252,8 @@ def preview(n: int, seed: int = 7) -> None:
         real = next((sent_for[m] for i in c["message_ids"] if (m := mid_of.get(i)) in sent_for), None)
         print("=" * 78, f"\n{r['case_id']}  {lab['code']}  {folders[lab['folder']]}\n")
         print("CLIENTE:\n" + r["text"][:800] + "\n")
-        if out and out.get("handoff"):
-            shown = f"(PARA UMA PESSOA: {out['handoff_reason']}) {out.get('action_note', '')}"
-        else:
-            shown = compose(out, "")[0] if out else "(sem rascunho: resposta do modelo inutilizável)"
+        shown = (f"[{out['flag']}] " if out and out["flag"] else "") + \
+            (compose(out, "")[0] if out else "(sem rascunho: resposta do modelo inutilizável)")
         print("RASCUNHO:\n" + shown + "\n")
         print("ENVIADO NA ALTURA:\n" + (K.strip_quotes(real["body_text"])[:1200] if real else "(nenhuma resposta)"))
 

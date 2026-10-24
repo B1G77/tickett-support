@@ -316,16 +316,20 @@ def test_a_card_shows_when_it_goes_out_automatically(tmp_path):
     assert all(c["auto_at"] == "" for c in api.state_json(app.cfg, st)["drafts"])
 
 
-def test_answered_is_an_action_route_and_people_cards_have_an_id(tmp_path):
+def test_answered_is_an_action_route_and_person_is_gone(tmp_path):
     server, port, app = start(tmp_path)
     try:
         st = app.state()
         DR.init(st)
         st.db.execute("INSERT INTO handoffs (message_id, created_at) VALUES ('<h@x>', 'now')")
         st.db.commit()
-        assert api.state_json(app.cfg, st)["people"][0]["id"] == AC.card_id("<h@x>")
+        DR.adopt_handoffs(st)
+        s = api.state_json(app.cfg, st)
+        assert "people" not in s and [c["id"] for c in s["drafts"]] == [AC.card_id("<h@x>")]   # a draft card now
         assert call(port, "/api/answered", "POST", {"id": "x"}, ACT)[0] == 401
-        assert call(port, "/api/answered", "POST", {"id": "x"}, {**ACT, "Cookie": login(port, "agent")})[0] == 409
+        agent = {**ACT, "Cookie": login(port, "agent")}
+        assert call(port, "/api/answered", "POST", {"id": "x", "version": "v"}, agent)[0] == 409
+        assert call(port, "/api/person", "POST", {"id": "x", "version": "v"}, agent)[0] == 404
     finally:
         server.shutdown()
 
@@ -374,7 +378,8 @@ def test_admin_autosend_reads_and_saves_the_settings(tmp_path):
     server, port, _ = start(tmp_path)
     try:
         agent, admin = login(port, "agent"), login(port, "admin")
-        on = {"enabled": True, "daily_limit": 5, "categories": ["F2"], "delay_minutes": 60}
+        on = {"enabled": True, "daily_limit": 5, "categories": ["F2"],
+              "delay_hours": {"F1": 0, "F2": 3, "F3": 0, "F4": 0, "F5": 0}}
         assert call(port, "/api/admin/autosend", headers={"Cookie": agent})[0] == 403
         assert call(port, "/api/admin/autosend", "POST", on, {**ACT, "Cookie": agent})[0] == 403
         assert call(port, "/api/admin/autosend", "POST", on, {"Content-Type": "application/json", "Cookie": admin})[0] == 403
@@ -383,17 +388,20 @@ def test_admin_autosend_reads_and_saves_the_settings(tmp_path):
         assert call(port, "/api/admin/autosend", "POST", on, ACT)[0] == 401
         code, _, body = call(port, "/api/admin/autosend", headers={"Cookie": admin})
         assert code == 200 and json.loads(body) == {"settings": {"enabled": False, "daily_limit": 20, "categories": [],
-                                                                 "delay_minutes": 0},
-                                                    "sent_today": 0, "readiness": []}
-        code, _, body = call(port, "/api/admin/autosend", "POST", {**on, "categories": ["F1"]}, {**ACT, "Cookie": admin})
+                                                                 "delay_hours": {**on["delay_hours"], "F2": 0}},
+                                                    "sent_today": 0, "readiness": [{"folder": "F1",
+                                                    "name": "1 Cancelamentos e Reembolsos", "drafts": 0, "unchanged": 0}]}
+        code, _, body = call(port, "/api/admin/autosend", "POST", {**on, "categories": ["F9"]}, {**ACT, "Cookie": admin})
         assert code == 400 and json.loads(body) == {"error": "Categoria não permitida."}
-        code, _, body = call(port, "/api/admin/autosend", "POST", {**on, "delay_minutes": 45}, {**ACT, "Cookie": admin})
-        assert code == 400 and json.loads(body) == {"error": "Atraso não permitido."}
+        code, _, body = call(port, "/api/admin/autosend", "POST", {**on, "delay_hours": {"F2": 721}},
+                             {**ACT, "Cookie": admin})
+        assert code == 400 and json.loads(body) == {"error": "Atraso inválido (0 a 720 horas)."}
         code, _, body = call(port, "/api/admin/autosend", "POST", on, {**ACT, "Cookie": admin})
         assert code == 200 and json.loads(body)["settings"] == on
         assert json.loads(call(port, "/api/admin/autosend", headers={"Cookie": admin})[2])["settings"] == on
         log = (tmp_path / "router.log").read_text()
-        assert 'autosend  {"enabled": true, "daily_limit": 5, "categories": ["F2"], "delay_minutes": 60}' in log and "F1" not in log
+        assert 'autosend  {"enabled": true, "daily_limit": 5, "categories": ["F2"], "delay_hours": {"F1": 0, "F2": 3,' in log
+        assert "F9" not in log
     finally:
         server.shutdown()
 
@@ -401,3 +409,67 @@ def test_admin_autosend_reads_and_saves_the_settings(tmp_path):
 def test_the_installer_builds_the_web_app():
     script = (Path(__file__).resolve().parent.parent / "scripts" / "router-install.sh").read_text()
     assert "npm run build" in script and 'web/dist/" "$APP/web/dist/"' in script
+
+
+def test_cards_carry_the_flag_the_finance_copy_and_an_order_key(tmp_path):
+    server, port, app = start(tmp_path)
+    server.shutdown()
+    st = app.state()
+    DR.init(st)
+    st.db.execute("INSERT INTO drafts (message_id, folder, body, created_at, received_at, from_email, flag, bcc) "
+                  "VALUES ('<r@x>', 'F1', 'x', 'v1', '2026-10-20T09:00:00+00:00', 'ana@gmail.com', 'tickett_refund', "
+                  "'finance@tickett.com')")
+    st.db.execute("INSERT INTO drafts (message_id, folder, body, created_at, from_email) "
+                  "VALUES ('<old@x>', 'F1', 'x', '2026-10-01T08:00:00+00:00', 'rui@gmail.com')")   # from before flags
+    st.db.execute("INSERT INTO handoffs (message_id, reason, created_at, received_at) "
+                  "VALUES ('<h@x>', 'legal', '2026-10-19T10:00:00+00:00', '2026-10-18T10:00:00+00:00')")
+    st.db.commit()
+    DR.adopt_handoffs(st)
+    s = api.state_json(app.cfg, st)
+    cards = {c["version"]: c for c in s["drafts"]}
+    assert (cards["v1"]["flag"], cards["v1"]["bcc"], cards["v1"]["sort"]) == (
+        "tickett_refund", "finance@tickett.com", "2026-10-20T09:00:00+00:00")
+    old = cards["2026-10-01T08:00:00+00:00"]
+    assert (old["flag"], old["bcc"], old["sort"]) == ("", "", "2026-10-01T08:00:00+00:00")
+    h = cards[next(v for v in cards if cards[v]["subject"] == "(sem assunto)" and cards[v]["reply"] == "")]
+    assert (h["folder"], h["flag"], h["sort"]) == ("F9", "person_must_act", "2026-10-18T10:00:00+00:00")
+
+
+def test_the_state_never_breaks_on_old_hand_offs(tmp_path):
+    server, port, app = start(tmp_path)
+    server.shutdown()
+    st = app.state()
+    DR.init(st)
+    st.db.execute("INSERT INTO handoffs (message_id, created_at) VALUES ('<h@x>', 'now')")
+    st.db.commit()
+    saved, DR.adopt_handoffs = DR.adopt_handoffs, lambda *a: (_ for _ in ()).throw(AssertionError("no writes here"))
+    try:
+        assert api.state_json(app.cfg, st)["drafts"] == []
+    finally:
+        DR.adopt_handoffs = saved
+
+
+def test_a_relayed_card_shows_the_address_in_para_and_the_route_saves_it(tmp_path):
+    server, port, app = start(tmp_path)
+    try:
+        st = app.state()
+        DR.init(st)
+        for mid, to in (("<a@x>", "rui@gmail.com"), ("<b@x>", "")):
+            st.db.execute("INSERT INTO drafts (message_id, folder, body, created_at, from_email, flag, to_override) "
+                          "VALUES (?, 'F1', 'Olá', ?, 'wp@calemamusic.com', 'relayed', ?)", (mid, mid, to))
+        st.db.commit()
+        cards = {c["version"]: c for c in api.state_json(app.cfg, st)["drafts"]}
+        a, b = cards["<a@x>"], cards["<b@x>"]
+        assert (a["to"], a["to_override"], a["to_differs"], a["refusal"]) == ("rui@gmail.com", "rui@gmail.com", False, "")
+        assert (b["to"], b["refusal"]) == ("", "Escreva o endereço do cliente em Para: antes de enviar.")
+        agent = {**ACT, "Cookie": login(port, "agent")}
+        assert call(port, "/api/to", "POST", {"id": AC.card_id("<b@x>"), "version": "<b@x>", "to": "x"}, ACT)[0] == 401
+        code, _, body = call(port, "/api/to", "POST", {"id": AC.card_id("<b@x>"), "version": "<b@x>",
+                                                       "to": "eva@gmail.com"}, agent)
+        out = json.loads(body)
+        assert code == 200 and out["message"] == "Endereço guardado." and out["version"] != "<b@x>"
+        code, _, body = call(port, "/api/to", "POST", {"id": AC.card_id("<a@x>"), "version": "<a@x>",
+                                                       "to": "x@tickett.com"}, agent)
+        assert code == 400
+    finally:
+        server.shutdown()

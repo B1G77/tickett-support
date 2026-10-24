@@ -142,7 +142,7 @@ def test_rules_only_mode_files_only_high_precision_cases():
     other = RT.decide(msg("Dúvida", "A que horas abrem as portas?"), st, None, None, RULES)
     scam = RT.decide(msg("Copyright Infringement Notice", "x", "x@ss.cnu.edu.vn"), st, None, None, RULES)
     assert (refund.folder, refund.source) == ("F1", "rule")
-    assert merch.folder == "F6" and other is None and scam.folder == "F8"
+    assert merch.folder == "F9" and other is None and scam.folder == "F8"
 
 
 def test_data_protection_requests_are_urgent():
@@ -239,27 +239,42 @@ def test_the_server_password_comes_from_the_environment():
         del os.environ["IMAP_PASSWORD"]
 
 
-NAMES = {"F1": "1 Cancelamentos e Reembolsos", "F8": "8 Não-cliente", "A": "10 Respondidos", "P": "0 Por Responder"}
-
-
-def test_a_handoff_goes_to_the_person_folder_and_keeps_the_category_in_the_reason():
-    d = RT.Decision("F1", False, "claude", "high", "refund for a cancelled event")
-    out = {"handoff": True, "handoff_reason": "tickett_refund"}
-    p = RT.to_person(d, out, NAMES)
-    assert p.folder == "P" and p.reason.startswith("1 Cancelamentos e Reembolsos -> tickett_refund")
-    assert p.suggested == "F1"
-
-
-def test_legal_mail_goes_to_a_person_but_drafts_and_scams_stay_put():
-    legal = RT.Decision("F1", True, "claude", "high", "lawyer letter")
-    assert RT.to_person(legal, None, NAMES).folder == "P"
-    reply = RT.Decision("F1", False, "claude", "high", "x")
-    assert RT.to_person(reply, {"handoff": False}, NAMES).folder == "F1"
-    assert RT.to_person(RT.Decision("F8", True, "rule", "high", "scam"), None, NAMES).folder == "F8"
-    no_folder = {k: v for k, v in NAMES.items() if k != "P"}
-    assert RT.to_person(legal, None, no_folder).folder == "F1"   # not configured: behaves as before
+def test_the_router_no_longer_moves_mail_to_the_person_folder_by_itself():
+    assert not hasattr(RT, "to_person")
 
 
 def test_the_handoff_folder_is_created_with_the_others():
     names = RT.folder_names({"folders": {"F1": "1 X"}, "answered_folder": "10 R", "handoff_folder": "0 Por Responder"})
     assert names == {"F1": "1 X", "A": "10 R", "P": "0 Por Responder"}
+
+
+def test_old_shop_and_partner_folders_become_a_rever():
+    st = state()
+    st.record("<shop@x>", [], RT.Decision("F9", False, "claude", "high", "x"), moved=True)
+    st.db.execute("UPDATE threads SET folder='F6' WHERE ref='<shop@x>'")   # remembered before the merge
+    st.db.commit()
+    d = RT.decide(msg("Re: Encomenda", "Ainda não chegou a camisola.", headers="In-Reply-To: <shop@x>\r\n"),
+                  st, StubRedactor(), StubClassifier())
+    assert (d.folder, d.source) == ("F9", "thread")
+    d = RT.decide(msg("Parceria", "Somos promotores de um festival."), state(), StubRedactor(),
+                  StubClassifier(folder="F7"))
+    assert d.folder == "F9"
+
+
+def test_the_database_moves_old_shop_and_partner_rows_to_a_rever(tmp_path):
+    st = RT.State(tmp_path / "router.db")
+    st.db.executemany("INSERT INTO decisions (message_id, folder) VALUES (?,?)",
+                      [("a", "F6"), ("b", "F7"), ("c", "F2"), ("d", "P")])
+    st.db.executemany("INSERT INTO threads VALUES (?,?)", [("a", "F6"), ("b", "F7"), ("c", "F2")])
+    st.db.commit()
+    for _ in range(2):   # idempotent
+        st = RT.State(tmp_path / "router.db")
+        assert dict(st.db.execute("SELECT message_id, folder FROM decisions")) == {"a": "F9", "b": "F9", "c": "F2",
+                                                                                    "d": "P"}
+        assert dict(st.db.execute("SELECT ref, folder FROM threads")) == {"a": "F9", "b": "F9", "c": "F2"}
+
+
+def test_the_shared_config_has_folders_1_to_5_8_and_9():
+    cfg = __import__("json").load(open(Path(__file__).resolve().parent.parent / "config" / "router.json"))
+    assert sorted(cfg["folders"]) == ["F1", "F2", "F3", "F4", "F5", "F8", "F9"]
+    assert cfg["folders"]["F9"] == "9 A Rever" and cfg["handoff_folder"] == "0 Por Responder"

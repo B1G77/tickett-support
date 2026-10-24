@@ -11,23 +11,9 @@
    "action": "No customer reply. Spam deleted after weekly review; admin/HR forwarded to the right person."
   },
   {
-   "id": "F7",
-   "name": "Parceiros e Promotores",
-   "precedence": 2,
-   "definition": "Organisers, venues, promoters and B2B contacts writing about running events: sales windows, ticket control, sales reports, payouts, partnerships. If a partner forwards or relays ONE customer's problem, classify by that customer's issue instead.",
-   "action": "Business follow-up by LeBillet."
-  },
-  {
-   "id": "F6",
-   "name": "Loja e Encomendas",
-   "precedence": 3,
-   "definition": "Merchandise orders from artist shops (e.g. Yanns, Loja Oficial Calema): order status, delivery date, address or size changes, missing confirmation.",
-   "action": "Check with the shop/fulfilment; send tracking."
-  },
-  {
    "id": "F1",
    "name": "Cancelamentos e Reembolsos",
-   "precedence": 4,
+   "precedence": 2,
    "definition": "The event was cancelled, postponed, moved or changed (time, room, line-up), or may be; or the customer cannot attend and wants to cancel. Includes refund requests and refund-status chasers for these reasons, and complaints about how an event was run that demand a refund.",
    "excludes": "Payment-error refunds: charged twice, charged with no order, bought more than intended (F3); paid but no ticket (F2).",
    "action": "Check event status and refund policy; process or report refund status."
@@ -35,37 +21,37 @@
   {
    "id": "F2",
    "name": "Bilhetes não recebidos",
-   "precedence": 5,
+   "precedence": 3,
    "definition": "Purchase completed/paid but the ticket did not arrive, cannot be opened, was sent to a wrong e-mail, or is needed in another format (PDF); resend requests. Also: a wrong ticket was issued (wrong event, zone or date). Tie-break F2 vs F3: if the customer saw an error or pending status at checkout, or was charged twice/too much -> F3; if checkout completed normally and there is no usable ticket -> F2.",
    "action": "Look up the order and resend."
   },
   {
    "id": "F3",
    "name": "Compra e Pagamento",
-   "precedence": 6,
+   "precedence": 4,
    "definition": "Problems buying or paying: checkout/site errors, payment pending or failed, payment method or country not accepted, duplicate charge, order-status confirmation, invoices/fatura/NIF. Also: duplicate or mistaken purchases and charges without an order, including the refund of those. Tie-break F2 vs F3: if the customer saw an error or pending status at checkout, or was charged twice/too much -> F3; if checkout completed normally and there is no usable ticket -> F2.",
    "action": "Check order/payment; fix or refund duplicate; issue invoice."
   },
   {
    "id": "F4",
    "name": "Alterações de Reserva",
-   "precedence": 7,
+   "precedence": 5,
    "definition": "Change an existing booking: date/session, seats, zone, ticket holder name.",
    "action": "Modify the booking if allowed."
   },
   {
    "id": "F5",
    "name": "Informações do Evento",
-   "precedence": 8,
+   "precedence": 6,
    "definition": "Questions about an event that is going ahead: availability, prices and promotions, VIP contents, age limits, venue/address, schedule, weather, accessibility.",
    "action": "Answer from event information (most automatable)."
   },
   {
    "id": "F9",
    "name": "A Rever",
-   "precedence": 9,
-   "definition": "Empty, unintelligible, or a formal notice whose content is not visible; anything that fits none of the above. Also: people who bought from another company (misdirected).",
-   "action": "Read by hand."
+   "precedence": 7,
+   "definition": "Read by hand. Empty, unintelligible, or a formal notice whose content is not visible; anything that fits none of the above. Also: people who bought from another company (misdirected); merchandise and shop orders from artist shops (e.g. Yanns, Loja Oficial Calema): order status, delivery date, address or size changes, missing confirmation; organisers, venues, promoters and B2B contacts writing about running events: sales windows, ticket control, sales reports, payouts, partnerships (if a partner forwards or relays ONE customer's problem, classify by that customer's issue instead).",
+   "action": "Read by hand; shop orders checked with the shop/fulfilment, partners followed up by Tickett."
   }
  ],
  "flags": [

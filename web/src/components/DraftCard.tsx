@@ -1,4 +1,5 @@
-// One reply draft: the customer's email beside the proposed reply, and the four actions.
+// One reply draft: the customer's email beside the proposed reply, and the four actions
+// (Enviar, Pedir alteração, Editar, Tratado sem resposta).
 // Every string from an email is rendered as React text, never as HTML.
 import { useState } from "react";
 import { sender, type Draft } from "../types";
@@ -6,6 +7,18 @@ import { useConfirm } from "./useConfirm";
 import "../pages/agent.css";
 
 export const MAX_COMMENT = 2000;
+
+/** The badge for a draft's flag (text, class), or null for a plain answer. */
+function flagBadge(d: Draft): [string, string] | null {
+  switch (d.flag) {
+    case "tickett_refund": return [d.bcc ? `Reembolso Tickett · cópia para ${d.bcc}` : "Reembolso Tickett", "badge"];
+    case "no_answer_in_sources": return ["Não confirmado pelas fontes — verifique antes de enviar", "badge badge-reason"];
+    case "person_must_act": return ["Precisa de uma pessoa", "badge badge-reason"];
+    case "legal": return ["Assunto legal", "badge badge-legal"];
+    case "relayed": return ["Responder diretamente ao cliente", "badge badge-reason"];
+    default: return null;
+  }
+}
 
 /** The open box under a card: a rewrite request or the edited reply, with what has been typed so far. */
 export type DraftForm = { mode: "ask" | "edit"; text: string } | null;
@@ -18,19 +31,31 @@ export type DraftCardProps = {
   onSend: () => void;
   onRewrite: (comment: string) => void;
   onEdit: (body: string) => void;
-  onPerson: () => void;
+  onDone: () => void; // Tratado sem resposta: closes the email without sending anything
+  onTo?: (to: string) => void; // relayed mail: save the customer's address typed in Para:
   onArmed?: (armed: boolean) => void; // Enviar waits for its confirming click: the page holds its poll
 };
 
 export default function DraftCard(
-  { draft: d, busy, form, onForm, onSend, onRewrite, onEdit, onPerson, onArmed }: DraftCardProps,
+  { draft: d, busy, form, onForm, onSend, onRewrite, onEdit, onDone, onTo, onArmed }: DraftCardProps,
 ) {
   const [full, setFull] = useState(false);
   const send = useConfirm(onSend, d.version, onArmed);
+  const done = useConfirm(onDone, d.version, onArmed);
   const working = busy !== "";
   const editing = form?.mode === "edit";
   const asking = form?.mode === "ask";
   const hasMore = d.full !== "" && d.full !== d.text;
+  const flag = flagBadge(d);
+  const relayed = d.flag === "relayed";
+  // Para: of a relayed email: what is typed, started again from the saved address whenever a new version arrives
+  const [toText, setToText] = useState(d.to_override);
+  const [toFor, setToFor] = useState(d.version);
+  if (toFor !== d.version) {
+    setToFor(d.version);
+    setToText(d.to_override);
+  }
+  const toDirty = relayed && toText.trim() !== d.to_override;
 
   return (
     <article className={"card draft-card" + (working ? " is-busy" : "")} aria-busy={working}
@@ -38,6 +63,7 @@ export default function DraftCard(
       <header className="card-head">
         <div className="card-meta">
           <span className="chip">{d.folder}</span>
+          {flag && <span className={flag[1]}>{flag[0]}</span>}
           <span className="card-from">{sender(d.from_name, d.from_email)}</span>
           <span className="card-time">{d.received}</span>
           {d.edited && <span className="badge">Editado</span>}
@@ -60,7 +86,21 @@ export default function DraftCard(
 
         <section className="draft-col draft-reply">
           <h3 className="col-label">{editing ? "Editar a resposta" : "Resposta proposta"}</h3>
-          <p className="to-line">Para: <span className="to-addr">{d.to || "—"}</span></p>
+          {relayed ? (
+            <div className="to-edit">
+              <label className="to-line" htmlFor={`to-${d.id}`}>Para</label>
+              <div className="form-row">
+                <input id={`to-${d.id}`} className="input" type="email" value={toText} disabled={working}
+                  placeholder="email do cliente" onChange={(e) => setToText(e.target.value)} />
+                <button type="button" className="btn" aria-label="Guardar endereço" disabled={working || !toDirty}
+                  onClick={() => onTo?.(toText.trim())}>Guardar</button>
+              </div>
+              <p className="to-hint">{d.to_override ? "Endereço do cliente encontrado no texto — confirme antes de enviar."
+                : "Escreva o endereço do cliente."}</p>
+            </div>
+          ) : (
+            <p className="to-line">Para: <span className="to-addr">{d.to || "—"}</span></p>
+          )}
           {d.to_differs && (
             <p className="warn-line">O endereço de resposta é diferente do remetente</p>
           )}
@@ -87,7 +127,8 @@ export default function DraftCard(
               <p>{d.note}</p>
             </div>
           )}
-          {d.blocked && (
+          {d.refusal && <p className="blocked-box">{d.refusal}</p>}
+          {!d.refusal && d.blocked && (
             <p className="blocked-box">Não pode ser enviado: {d.blocked}. Peça uma alteração ou edite o texto.</p>
           )}
         </section>
@@ -116,7 +157,7 @@ export default function DraftCard(
 
       <footer className="card-actions">
         <button type="button" className={"btn btn-primary btn-send" + (send.armed ? " is-armed" : "")}
-          disabled={working || !!d.blocked || editing} onClick={send.click}>
+          disabled={working || !!d.blocked || !!d.refusal || editing || toDirty} onClick={() => { done.disarm(); send.click(); }}>
           {send.armed ? "Confirmar envio" : "Enviar"}
         </button>
         <button type="button" className="btn" aria-pressed={asking} disabled={working}
@@ -127,7 +168,9 @@ export default function DraftCard(
         {working && <span className="card-progress"><span className="spinner" aria-hidden="true" />{busy}</span>}
         {!working && send.armed && <span className="card-progress">Clique outra vez para enviar ao cliente.</span>}
         {!working && editing && <span className="card-progress">Guarde a edição antes de enviar.</span>}
-        <button type="button" className="btn btn-ghost" disabled={working} onClick={onPerson}>Respondo eu</button>
+        {!working && done.armed && <span className="card-progress">Clique outra vez: fecha o email sem resposta.</span>}
+        <button type="button" className={"btn btn-ghost" + (done.armed ? " is-armed" : "")} disabled={working}
+          onClick={() => { send.disarm(); done.click(); }}>{done.armed ? "Confirmar: tratado sem resposta" : "Tratado sem resposta"}</button>
       </footer>
     </article>
   );

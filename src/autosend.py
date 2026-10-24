@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Automatic sending: a fresh draft in a category the admin switched on goes out without a person.
 
-Off by default, and never for refunds and cancellations (F1), partners (F7) or mail to review (F9).
+Off by default, and never for mail to review (F9); refunds and cancellations (F1) only when Tickett handles
+the refund; never for a draft flagged legal, relayed, no_answer_in_sources or person_must_act.
 The router calls maybe_send right after a draft is saved; anything doubtful is not sent and stays a
 draft for a person, with the reason in the router log:
-  settings / save_settings   meta key autosend: enabled, daily_limit (0-200), categories (F2-F6),
-                             delay_minutes (one of DELAYS, counted from when the router first saw the email)
+  settings / save_settings   meta key autosend: enabled, daily_limit (0-200), categories (F1-F5),
+                             delay_hours ({folder: 0-720}, counted from when the router first saw the email)
   why_not                    "" when a draft may go out, else the first reason it may not
   send_due                   each router cycle: the drafts whose wait is over, checked again and sent
   status                     the admin page: settings, automatic sends today, 30-day readiness
@@ -18,13 +19,16 @@ from datetime import datetime, timedelta, timezone
 
 import drafts as DR
 import ledger as LG
+import triage as T
 from imap_util import Mailbox
 
-NEVER = ("F1", "F7", "F9")
-ALLOWED = ("F2", "F3", "F4", "F5", "F6")
-DEFAULT = {"enabled": False, "daily_limit": 20, "categories": [], "delay_minutes": 0}
-DELAYS = (0, 15, 30, 60, 120, 180, 240, 360, 480, 720, 1440)
+NEVER = ("F9",)
+ALLOWED = ("F1", "F2", "F3", "F4", "F5")
+DEFAULT = {"enabled": False, "daily_limit": 20, "categories": []}
+MAX_HOURS = 720   # 30 days
 MAX_LIMIT = 200
+AUTO_FLAGS = ("", "tickett_refund")   # any other flag: a person reads it first
+F1_ONLY = "tickett_refund"
 READINESS_DAYS = 30
 # the host part of a link, as a browser reads it: slashes or backslashes after the scheme are skipped and
 # a backslash ends the host, so "evil.com\@tickett.com" is evil.com; an empty host is refused
@@ -45,19 +49,21 @@ def _clean(s) -> dict:
         raise ValueError(f"O limite diário tem de ser um número de 0 a {MAX_LIMIT}.")
     if not isinstance(cats, list) or any(c not in ALLOWED for c in cats):
         raise ValueError("Categoria não permitida.")
-    delay = s.get("delay_minutes", 0)
-    if type(delay) is not int or delay not in DELAYS:
-        raise ValueError("Atraso não permitido.")
-    return {"enabled": enabled, "daily_limit": limit, "categories": sorted(set(cats)), "delay_minutes": delay}
+    hours = s.get("delay_hours", {})   # settings saved before it existed: no wait anywhere
+    if not isinstance(hours, dict) or any(k not in ALLOWED or type(v) is not int or not 0 <= v <= MAX_HOURS
+                                          for k, v in hours.items()):
+        raise ValueError(f"Atraso inválido (0 a {MAX_HOURS} horas).")
+    return {"enabled": enabled, "daily_limit": limit, "categories": sorted(set(cats)),
+            "delay_hours": {f: hours.get(f, 0) for f in ALLOWED}}
 
 
 def settings(state) -> dict:
     """The saved settings; anything unreadable or not allowed reads as all off."""
     row = state.db.execute("SELECT value FROM meta WHERE key='autosend'").fetchone()
     try:
-        return _clean(json.loads(row[0])) if row else dict(DEFAULT)
+        return _clean(json.loads(row[0]) if row else DEFAULT)
     except (ValueError, TypeError):
-        return dict(DEFAULT)
+        return _clean(DEFAULT)
 
 
 def save_settings(state, s: dict) -> dict:
@@ -113,6 +119,13 @@ def why_not(rec: dict, row: dict, d, s: dict, sent_today: int, sender_today: boo
         return "category not switched on"
     if d.urgent:
         return "urgent"
+    if row.get("forwarded") or DR.forwarded(T.classify(rec)[1]):   # a person always sends a forward
+        return "forwarded mail: a person sends it"
+    flag = row.get("flag") or ""
+    if flag not in AUTO_FLAGS:
+        return f"draft flagged {flag}"
+    if d.folder == "F1" and flag != F1_ONLY:
+        return "refunds go out automatically only when Tickett handles them"
     if not AC.reply_to_ok(rec) or AC.recipient(rec).lower() != (rec.get("from_email") or "").lower():
         return "Reply-To differs from the sender"
     if (rec.get("auto_submitted") or "").strip().lower() not in ("", "no"):
@@ -174,8 +187,8 @@ def maybe_send(cfg, state, box, rec: dict, mid: str, d, log, send_mail=None) -> 
         if why:
             log(mid, f"not sent automatically: {why}")
             return False
-        wait = s.get("delay_minutes", 0)
-        at = _seen_at(state, row) + timedelta(minutes=wait) if wait else None
+        wait = s["delay_hours"].get(d.folder, 0)
+        at = _seen_at(state, row) + timedelta(hours=wait) if wait else None
         if at and at > datetime.now(timezone.utc):
             state.db.execute("UPDATE drafts SET auto_after=? WHERE message_id=? AND created_at=? AND closed_at IS NULL "
                              "AND sent_at IS NULL", (at.isoformat(timespec="seconds"), mid, row["created_at"]))
@@ -257,10 +270,10 @@ def send_due(cfg, state, box, log, now=None, send_mail=None) -> int:
         now = now or datetime.now(timezone.utc)
         cur = state.db.execute("SELECT * FROM drafts WHERE closed_at IS NULL AND sent_at IS NULL AND auto_after IS NOT NULL")
         cols = [c[0] for c in cur.description]
-        wait = timedelta(minutes=settings(state).get("delay_minutes", 0))
+        hours = settings(state)["delay_hours"]
         rows = []
         for r in (dict(zip(cols, v)) for v in cur.fetchall()):
-            at = _seen_at(state, r) + wait
+            at = _seen_at(state, r) + timedelta(hours=hours.get(r["folder"], 0))
             if at <= now:
                 rows.append(r)
             elif at.isoformat(timespec="seconds") != r["auto_after"]:

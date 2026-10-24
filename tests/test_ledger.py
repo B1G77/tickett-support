@@ -247,7 +247,7 @@ def test_usage_backfill_copies_draft_tokens_once():
                               ("2026-10-02T10:00:00+00:00", "draft", "claude-opus-5", 101, 10, 50, 0)]
 
 
-def test_the_draft_and_handoff_hooks_record_usage():
+def test_the_draft_hook_records_usage():
     st = state()
     u = {"in": 3, "out": 2, "cache_read": 1, "cache_write": 4}
 
@@ -259,14 +259,12 @@ def test_the_draft_and_handoff_hooks_record_usage():
     cfg = {"imap": {"user": "s@x"}, "model": "m-cfg"}
     orig_compose, orig_reply = DR.D.compose, DR.D.reply_message
     DR.D.compose = lambda o, n: ("t", "b", "")
-    DR.D.reply_message = lambda r, t, user: (b"raw", "<dm>")
+    DR.D.reply_message = lambda r, t, user, bcc="": (b"raw", "<dm>")
     try:
         assert DR.save(Box(), "Drafts", rec(), "<a>", d, st, {"usage": u}, drafter, cfg, lambda *a: None)
-        DR.note_handoff(st, "<b>", {"handoff_reason": "legal", "usage": u, "model": "m-h"}, lambda *a: None, rec())
-        DR.note_handoff(st, "<c>", {"handoff_reason": "legal"}, lambda *a: None, rec())   # no model call: nothing
     finally:
         DR.D.compose, DR.D.reply_message = orig_compose, orig_reply
-    assert usage_rows(st) == [("draft", "m-cfg", 3, 2, 1, 4), ("handoff", "m-h", 3, 2, 1, 4)]
+    assert usage_rows(st) == [("draft", "m-cfg", 3, 2, 1, 4)]
 
 
 def test_purge_clears_old_text_and_keeps_counts():

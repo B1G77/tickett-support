@@ -17,7 +17,9 @@ TAXONOMY = ROOT / "config" / "taxonomy.json"
 MODEL = "claude-opus-5"
 # Server-side refusal fallback: a declined request is re-run on another model.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
-FOLDER_IDS = [f"F{i}" for i in range(1, 10)]
+FOLDER_IDS = ["F1", "F2", "F3", "F4", "F5", "F8", "F9"]
+# Shop orders (F6) and partners (F7) are read by hand in 9 A Rever since 23 Oct 2026.
+MERGED = {"F6": "F9", "F7": "F9"}
 SEND_FIELDS = ("subject", "text", "languages", "n_messages", "attachment_hints")
 SCHEMA = {
     "type": "object",
@@ -83,6 +85,11 @@ def build_request(case: dict, tax: dict, model: str = MODEL) -> dict:
     }
 
 
+def current_folder(fid: str | None) -> str | None:
+    """A folder id as it is today: the old shop and partner folders read as F9."""
+    return MERGED.get(fid, fid)
+
+
 def parse_response(resp) -> dict:
     if getattr(resp, "stop_reason", None) == "refusal":
         return {**UNSURE, "reason": "model declined"}
@@ -91,6 +98,8 @@ def parse_response(resp) -> dict:
         out = json.loads(text)
     except (json.JSONDecodeError, TypeError):
         return {**UNSURE, "reason": "unparseable output"}
+    if isinstance(out, dict) and out.get("folder") in MERGED:
+        out["folder"] = MERGED[out["folder"]]
     if not isinstance(out, dict) or out.get("folder") not in FOLDER_IDS:
         return {**UNSURE, "reason": "unknown folder"}
     return out

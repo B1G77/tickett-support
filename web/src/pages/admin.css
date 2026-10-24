@@ -254,8 +254,6 @@
 .switch-title { display: block; font-size: 16px; font-weight: 600; }
 .switch-sub { display: block; font-size: 13px; }
 .auto-limit { width: 140px; }
-.auto-delay { width: min(320px, 100%); }
-.auto-delay .range { width: 100%; accent-color: var(--accent); }
 .auto-today { color: var(--text-2); }
 .auto-today b { color: var(--text); font-size: 18px; font-variant-numeric: tabular-nums; }
 
@@ -291,6 +289,8 @@
 .auto-table td.num { vertical-align: middle; }
 .row-off th, .row-off td { color: var(--text-3); }
 .never { margin-right: 10px; font-size: 12px; font-weight: 600; color: var(--text-3); }
+.row-note { display: block; font-size: 12px; font-weight: 400; }
+.input-hours { width: 88px; text-align: right; }
 
 .auto-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; }
 .auto-actions .btn { min-width: 160px; }

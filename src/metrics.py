@@ -12,11 +12,12 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 
 import actions as AC
+import classify as C
 import drafts as DR
 import ledger as L
 import router as RT
 
-OPEN_FOLDERS = ("F1", "F2", "F3", "F4", "F5", "F6", "F7", "F9", "P")   # not A (answered), not F8
+OPEN_FOLDERS = ("F1", "F2", "F3", "F4", "F5", "F9", "P")   # not A (answered), not F8
 
 
 def _waiting(state) -> set[str]:
@@ -91,7 +92,7 @@ def _quality(state, cfg: dict, start: date, end: date) -> list[dict]:
     for d in _rows(state, "SELECT * FROM drafts WHERE closed_at IS NOT NULL"):
         day = _day(d["closed_at"])
         if day and start <= day <= end and d["closed_how"] != "auto":   # sent automatically: never reviewed
-            groups.setdefault(d["folder"], []).append(d)
+            groups.setdefault(C.current_folder(d["folder"]), []).append(d)   # old 6 and 7 count as 9
     return [{"folder": f, "name": names.get(f, f), "drafts": len(ds),
              "unchanged": sum(AC.unchanged(d) for d in ds),
              "edited": sum(d["closed_how"] == "sent" and d["edited"] == 1 for d in ds),
@@ -125,7 +126,7 @@ def report(cfg: dict, state, start: date, end: date, now: datetime) -> dict:
                  if (t := _local(r["received_at"]))]
     since = state.db.execute("SELECT value FROM meta WHERE key='ledger_since'").fetchone()
     names = RT.folder_names(cfg)
-    folders = Counter(r["folder"] for r in got)
+    folders = Counter(C.current_folder(r["folder"]) for r in got)
     return {
         "complete_since": since[0] if since else "",
         "overview": {"received": len(got), "answered": len(done),

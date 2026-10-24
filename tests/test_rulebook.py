@@ -7,7 +7,7 @@ BOOK = Path(__file__).resolve().parent.parent / "config" / "rulebook.md"
 
 def test_rulebook_has_every_section_and_decision():
     text = BOOK.read_text(encoding="utf-8")
-    for heading in ("## Sources, in this order", "## Hand-off to a person", "## Tone", "## Decisions",
+    for heading in ("## Sources, in this order", "## Flags (a reply is always written)", "## Tone", "## Decisions",
                     "## By topic", "## Never", "## Examples"):
         assert heading in text, heading
     for rule in ("tickett_refund", "no_answer_in_sources", "person_must_act", "service fee is not refunded",
@@ -20,3 +20,10 @@ def test_rulebook_holds_no_personal_data():
     text = BOOK.read_text(encoding="utf-8")
     assert set(re.findall(r"[\w.+-]+@[\w-]+\.[\w.]+", text)) <= {"atendimento@lebillet.eu"}
     assert not re.search(r"\+?\d[\d ]{8,}\d", text)
+
+
+def test_there_is_always_a_reply_and_no_hand_off():
+    text = BOOK.read_text(encoding="utf-8")
+    assert "hand off" not in text.lower() and "hand-off" not in text.lower() and "handoff" not in text.lower()
+    assert "being handled by the team" in text and "best attempt" in text
+    assert "Folder 6" not in text and "Folder 7" not in text and "Folder 9, A Rever" in text

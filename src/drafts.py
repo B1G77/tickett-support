@@ -3,7 +3,7 @@
 
 Run by the router when config drafts.enabled is true:
   maybe_crawl   once a day, refresh the lebillet.eu facts (site_facts.crawl)
-  try_draft     after a message is filed in folders 1-7, write a reply into Drafts
+  try_draft     after a customer email is filed in folders 1-5 or 9, write a reply into Drafts
   note_sent     when a reply in Sent answers a drafted message, store how much of
                 the draft was kept (1.0 = sent unchanged)
   report        router.py --drafts
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import difflib
 import imaplib
+import sqlite3
 import statistics
 import time
 from collections import Counter
@@ -22,16 +23,18 @@ import cases as K
 import drafter as D
 import events_doc as ED
 import extract as E
+import relay as RL
 import site_facts as SF
+import triage as T
 
-DRAFT_FOLDERS = ("F1", "F2", "F3", "F4", "F5", "F6", "F7")
+DRAFT_FOLDERS = ("F1", "F2", "F3", "F4", "F5", "F9")
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-# The customer's email is kept next to each draft and hand-off so the dashboard can show it
+# The customer's email is kept next to each draft (and old hand-off) so the dashboard can show it
 # without asking the mail server. router.db stays in the private data folder.
 EMAIL_COLS = ("from_name", "from_email", "reply_to", "received_at", "newest_text", "full_text")
 MAX_FULL = 20000
@@ -51,8 +54,23 @@ def init(state) -> None:
         body TEXT, subject TEXT, created_at TEXT, sent_at TEXT, kept REAL, tokens_in INT, tokens_out INT,
         cache_read INT, cache_write INT)""")
     _add_columns(state, "drafts", EMAIL_COLS + ("closed_at", "closed_how", "first_body", "rewrites INT DEFAULT 0",
-                                         "edited INT DEFAULT 0", "auto_after"))
+                                         "edited INT DEFAULT 0", "auto_after", "flag", "bcc", "to_override",
+                                         "to_set_by_person INT DEFAULT 0", "forwarded INT DEFAULT 0"))
+    import relayed_check   # it uses this module
+    relayed_check.run(state)
+    # relayed drafts from before the Para: field: the customer's address from their stored text, once
+    old = state.db.execute("SELECT message_id, from_email, COALESCE(full_text, newest_text, '') FROM drafts "
+                           "WHERE flag='relayed' AND to_override IS NULL").fetchall()
+    for mid, relayer, text in old:
+        state.db.execute("UPDATE drafts SET to_override=? WHERE message_id=? AND to_override IS NULL",
+                         (RL.customer_address(text, relayer or ""), mid))
+    if old:
+        state.db.commit()
     # rows from before first_body (not rows whose text was purged: those stay as they are)
+    if "folder" in {r[1] for r in state.db.execute("PRAGMA table_info(drafts)")} and \
+            state.db.execute("SELECT 1 FROM drafts WHERE folder IN ('F6', 'F7')").fetchone():   # merged into 9
+        state.db.execute("UPDATE drafts SET folder='F9' WHERE folder IN ('F6', 'F7')")
+        state.db.commit()
     if state.db.execute("SELECT 1 FROM drafts WHERE first_body IS NULL AND body IS NOT NULL").fetchone():
         state.db.execute("UPDATE drafts SET first_body=body WHERE first_body IS NULL AND body IS NOT NULL")
         state.db.commit()
@@ -78,11 +96,39 @@ def mark_answered(state, mid: str) -> None:
     state.db.commit()
 
 
-def relayed(d, reason: str) -> bool:
-    """Customer mail that came through a partner or the website form: a reply would go to the
-    partner or the form mailer, so a person answers the customer directly."""
-    return d.folder in DRAFT_FOLDERS and (reason.startswith("website contact form")
-                                          or reason.startswith("forwarded to support"))
+def relayed(d, reason: str, rec: dict) -> bool:
+    """Customer mail that came through the website form (the sender is the form mailer), or a forward: a reply to
+    the sender would go to the partner or the form mailer. Not relayed only on positive evidence that a customer
+    forwarded their own email (relay.own_forward: a forwarded block with only tickett, no-reply or their own
+    addresses in it)."""
+    if d.folder not in DRAFT_FOLDERS:
+        return False
+    if reason.startswith("website contact form"):
+        return True
+    return reason.startswith("forwarded to support") and \
+        not RL.own_forward(rec.get("body_text") or "", rec.get("from_email") or "")
+
+
+def flag_for(d, reason: str, rec: dict) -> str:
+    """The router's own flag, which wins over the model's: relayed (the reply would go to the partner or the form
+    mailer), else legal (urgent), else ""."""
+    return "relayed" if relayed(d, reason, rec) else "legal" if d.urgent else ""
+
+
+def greet_name(flag: str, rec: dict) -> str:
+    """The first name the reply greets: the sender's, but for relayed mail the customer's name next to the
+    address found in the text (never the partner's or the form mailer's); "" when there is none."""
+    if flag == "relayed":
+        return D.first_name(RL.customer(rec.get("body_text") or "", rec.get("from_email") or "")[1])
+    return D.first_name(rec.get("from_name", ""))
+
+
+RECHECK_KEY = "relayed_checked_4"   # bumped whenever the relayed rule gets stricter: relayed_check runs again
+
+
+def forwarded(reason: str) -> bool:
+    """A forward by triage: never sent automatically, even when it is the customer's own (a normal draft)."""
+    return reason.startswith("forwarded to support")
 
 
 def has_draft(state, mid: str) -> bool:
@@ -90,12 +136,9 @@ def has_draft(state, mid: str) -> bool:
     return state.db.execute("SELECT 1 FROM drafts WHERE message_id=?", (mid,)).fetchone() is not None
 
 
-def qualifies(d, bucket: str, state, mid: str, reason: str = "") -> bool:
-    """False for the website contact form and partner-forward buckets: the From address there
-    is the form mailer or the partner, not the customer a reply would be addressed to."""
-    if reason.startswith("website contact form") or reason.startswith("forwarded to support"):
-        return False
-    return d.folder in DRAFT_FOLDERS and not d.urgent and bucket == "customer" and not has_draft(state, mid)
+def qualifies(d, bucket: str, state, mid: str) -> bool:
+    """Every customer email in a draft folder gets one draft, legal and relayed mail too (flag_for marks those)."""
+    return d.folder in DRAFT_FOLDERS and bucket == "customer" and not has_draft(state, mid)
 
 
 def draft_case(rec: dict, redactor) -> dict | None:
@@ -105,9 +148,9 @@ def draft_case(rec: dict, redactor) -> dict | None:
     return None if leaks else {"subject": subject, "text": text, "language": rec.get("lang_guess", "")}
 
 
-def prepare(rec: dict, mid: str, d, drafter, redactor, cfg: dict, log) -> dict | None:
-    """Claude's answer for one email (a reply or a hand-off), or None when there is none to use.
-    Never raises: a missing draft must never hold up the filing."""
+def prepare(rec: dict, mid: str, d, drafter, redactor, cfg: dict, log, reason: str = "") -> dict | None:
+    """Claude's reply for one email, with its flag (the router's from flag_for, else the model's), or None when
+    there is none to use. `reason` is the triage reason. Never raises: a missing draft must never hold up the filing."""
     try:
         case = draft_case(rec, redactor)
         if case is None:
@@ -117,6 +160,11 @@ def prepare(rec: dict, mid: str, d, drafter, redactor, cfg: dict, log) -> dict |
                             date.today())
         if out is None:
             log(mid, "no draft - model answer unusable")
+            return None
+        out["forwarded"] = forwarded(reason)
+        if flag_for(d, reason, rec):
+            out["tickett_refund"] = out.get("flag") == "tickett_refund"   # finance still gets its copy (save)
+            out["flag"] = flag_for(d, reason, rec)
         return out
     except Exception as exc:
         log(mid, f"no draft ({type(exc).__name__})")
@@ -129,59 +177,179 @@ def _usage(state, kind: str, out: dict, model: str, log=None) -> None:
     LG.note_usage(state, kind, out.get("model") or model, out.get("usage", {}), log)
 
 
-def note_handoff(state, mid: str, out: dict, log, rec: dict | None = None) -> None:
-    """A hand-off to a person: why, what the team needs to know, and the customer's email."""
+EMPTY_NOTE = "Não foi possível escrever um rascunho; escreva a resposta aqui."
+
+
+def category(state, mid: str, fallback: str = "F9") -> str:
+    """The email's real topic for its draft: the category a hand-off (folder P) came from, else its folder;
+    the old 6 and 7, and anything unknown, read as 9."""
+    import classify as C
+    row = state.db.execute("SELECT folder, suggested FROM decisions WHERE message_id=?", (mid,)).fetchone()
+    fid = C.current_folder((row[1] if row[0] == "P" else row[0]) if row else fallback)
+    return fid if fid in DRAFT_FOLDERS else "F9"
+
+
+def placeholder(row: dict | None) -> bool:
+    """An empty draft nobody has touched yet (save_empty, adopt_handoffs): a real draft may replace it."""
+    return bool(row) and row.get("closed_at") is None and row.get("sent_at") is None and not row.get("body") \
+        and row.get("note") == EMPTY_NOTE and not row.get("edited") and not row.get("rewrites") \
+        and not row.get("to_set_by_person")
+
+
+# the untouched empty draft of placeholder(), as SQL: the only kind of row a new draft may replace
+_UNTOUCHED = ("closed_at IS NULL AND sent_at IS NULL AND COALESCE(body, '')='' AND COALESCE(edited, 0)=0 "
+              "AND COALESCE(rewrites, 0)=0 AND COALESCE(to_set_by_person, 0)=0 AND note=?")
+
+
+def _claimable(state, mid: str) -> bool:
+    """No draft yet, or only an untouched empty one."""
     init(state)
-    note = (out.get("action_note") or "").strip()
-    e = email_fields(rec) if rec else dict.fromkeys(EMAIL_COLS)
-    state.db.execute("INSERT OR REPLACE INTO handoffs (message_id, reason, note, created_at, subject, "
-                     f"{', '.join(EMAIL_COLS)}) VALUES ({','.join('?' * (5 + len(EMAIL_COLS)))})",
-                     (mid, out.get("handoff_reason", ""), note, _now(), (rec or {}).get("subject"),
-                      *[e[c] for c in EMAIL_COLS]))
-    state.db.commit()
-    if "usage" in out:   # a hand-off made without a model call (legal mail) has none
-        _usage(state, "handoff", out, D.MODEL, log)
-    log(mid, f"hand-off ({out.get('handoff_reason', '')})" + (f" - nota: {note}" if note else ""))
+    return state.db.execute(f"SELECT 1 FROM drafts WHERE message_id=? AND NOT ({_UNTOUCHED})",
+                            (mid, EMPTY_NOTE)).fetchone() is None
+
+
+def to_override(flag: str, text: str, relayer: str) -> str:
+    """Where a relayed reply goes: the customer's address found in the text ("" when none); "" for other mail."""
+    return RL.customer_address(text or "", relayer or "") if flag == "relayed" else ""
+
+
+def _insert_empty(state, mid: str, folder: str, subject: str, fields: dict, flag: str, fwd: bool) -> None:
+    to = to_override(flag, fields.get("full_text") or fields.get("newest_text") or "", fields.get("from_email"))
+    state.db.execute("INSERT OR IGNORE INTO drafts (message_id, draft_mid, folder, rulebook_sha, note, body, first_body, "
+                     f"subject, created_at, flag, bcc, to_override, forwarded, {', '.join(EMAIL_COLS)}) "
+                     f"VALUES (?,'',?,'',?,'','',?,?,?,'',?,?,{','.join('?' * len(EMAIL_COLS))})",
+                     (mid, folder, EMPTY_NOTE, subject, _now(), flag, to, int(fwd), *[fields.get(c) for c in EMAIL_COLS]))
+
+
+def handoff_rec(h: dict) -> dict:
+    """An email rebuilt from the text stored with a hand-off (no mailbox), enough for triage and drafting."""
+    sender = h.get("from_email") or ""
+    return {"message_id": h["message_id"], "subject": h.get("subject") or "", "from_name": h.get("from_name") or "",
+            "from_email": sender, "from_domain": sender.rpartition("@")[2].lower(), "reply_to": h.get("reply_to") or "",
+            "date": h.get("received_at") or "", "body_text": h.get("full_text") or h.get("newest_text") or ""}
+
+
+def save_empty(state, rec: dict, mid: str, d, log, reason: str = "") -> None:
+    """No draft could be written: an empty one, so the card still shows with a reply to write. It keeps the
+    router's flag (relayed, legal), else person_must_act. Never raises."""
+    try:
+        init(state)
+        _insert_empty(state, mid, d.folder, rec.get("subject", ""), email_fields(rec),
+                      flag_for(d, reason, rec) or "person_must_act", forwarded(reason))
+        state.db.commit()
+        log(mid, "empty draft saved - write the reply on the dashboard")
+    except Exception as exc:
+        state.db.rollback()
+        log(mid, f"no empty draft ({type(exc).__name__})")
+
+
+def adopt_handoffs(state) -> None:
+    """Open hand-offs from before drafts for every email, still without a draft: an empty draft each, in the
+    email's real topic, so they show as normal cards. The hand-off row stays for history."""
+    import router as RT   # router imports this module
+    rows = state.db.execute("""SELECT h.* FROM handoffs h WHERE h.answered_at IS NULL
+        AND NOT EXISTS (SELECT 1 FROM drafts WHERE drafts.message_id=h.message_id)""")
+    cols = [c[0] for c in rows.description]
+    have_replies = state.db.execute("SELECT 1 FROM sqlite_master WHERE name='replies'").fetchone()
+    added = 0
+    for h in (dict(zip(cols, r)) for r in rows.fetchall()):
+        if have_replies and state.db.execute("SELECT 1 FROM replies WHERE message_id=? AND answered_at IS NOT NULL",
+                                             (h["message_id"],)).fetchone():
+            continue
+        mid = h["message_id"]
+        urgent = state.db.execute("SELECT urgent FROM decisions WHERE message_id=?", (mid,)).fetchone()
+        d = RT.Decision(category(state, mid), bool(urgent and urgent[0]), "handoff", "", "")
+        r = handoff_rec(h)
+        why = T.classify(r)[1]
+        _insert_empty(state, mid, d.folder, h.get("subject") or "", h, flag_for(d, why, r) or "person_must_act",
+                      forwarded(why))
+        added += 1
+    if added:
+        state.db.commit()
 
 
 def save(box, drafts_folder: str, rec: dict, mid: str, d, state, out: dict, drafter, cfg: dict, log) -> bool:
-    """Write the reply into Drafts, inside the conversation, and remember it."""
+    """Write the reply into Drafts, inside the conversation, and remember it. A relayed reply stays on the
+    dashboard only: in Mail's Drafts it would be addressed to the partner or the form mailer."""
     try:
-        text, body, note = D.compose(out, D.first_name(rec.get("from_name", "")))
-        raw, draft_mid = D.reply_message(rec, text, cfg["imap"]["user"])
-        box.append(drafts_folder, "(\\Draft)", imaplib.Time2Internaldate(time.time()), raw)
-        init(state)
+        if not _claimable(state, mid):   # sent, closed or worked on meanwhile: never replaced
+            log(mid, "no draft - the email already has a draft a person handled")
+            return False
+        flag = out.get("flag") or ""
+        text, body, note = D.compose(out, greet_name(flag, rec))
+        refund = flag == "tickett_refund" or out.get("tickett_refund")
+        bcc = cfg.get("refund_bcc", "") if refund else ""   # finance sees Tickett's refunds, whatever the flag shown
+        draft_mid = put_draft(box, drafts_folder, rec, text, cfg, flag, bcc)   # removed again on any failure below
         u = out.get("usage", {})
-        e = email_fields(rec)
-        state.db.execute("INSERT OR REPLACE INTO drafts (message_id, draft_mid, folder, rulebook_sha, note, body, "
-                         "subject, created_at, tokens_in, tokens_out, cache_read, cache_write, first_body, "
-                         f"{', '.join(EMAIL_COLS)}) VALUES ({','.join('?' * (13 + len(EMAIL_COLS)))})",
-                         (mid, draft_mid, d.folder, drafter.sha, note, body, rec.get("subject", ""), _now(),
-                          u.get("in", 0), u.get("out", 0), u.get("cache_read", 0), u.get("cache_write", 0), body,
-                          *[e[c] for c in EMAIL_COLS]))
-        state.db.commit()
+        try:
+            e = email_fields(rec)
+            # only an untouched empty draft makes way; anything else makes the INSERT fail (checked again in SQL)
+            state.db.execute(f"DELETE FROM drafts WHERE message_id=? AND {_UNTOUCHED}", (mid, EMPTY_NOTE))
+            _insert_draft(state, mid, draft_mid, d, drafter, note, body, rec, u, flag, bcc, e, out.get("forwarded"))
+        except sqlite3.IntegrityError:
+            state.db.rollback()
+            _drop_copy(box, drafts_folder, draft_mid)
+            log(mid, "no draft - the email already has a draft a person handled")
+            return False
+        except Exception:
+            state.db.rollback()
+            _drop_copy(box, drafts_folder, draft_mid)   # no row points at it: it must not stay in Drafts
+            raise
+        try:
+            state.db.commit()
+        except Exception:
+            state.db.rollback()
+            _drop_copy(box, drafts_folder, draft_mid)
+            raise
         _usage(state, "draft", out, cfg.get("model", D.MODEL), log)
-        log(mid, "draft saved" + (f" - nota: {note}" if note else ""))
+        log(mid, "draft saved" + (f" ({flag})" if flag else "") + (f" - nota: {note}" if note else ""))
         return True
     except Exception as exc:
+        state.db.rollback()   # never leave the DELETE of the empty draft pending
         log(mid, f"no draft ({type(exc).__name__})")
         return False
 
 
-def make_draft(box, drafts_folder: str, rec: dict, mid: str, d, state, drafter, redactor, cfg: dict, log) -> bool:
-    """Prepare and save in one go (draft_backlog.py); a hand-off is noted, not drafted."""
-    out = prepare(rec, mid, d, drafter, redactor, cfg, log)
+def _drop_copy(box, drafts_folder: str, draft_mid: str) -> None:
+    if box is not None and draft_mid:
+        box.select(drafts_folder)
+        for uid in box.find(draft_mid):
+            box.delete(uid)
+
+
+def _insert_draft(state, mid, draft_mid, d, drafter, note, body, rec, u, flag, bcc, e, fwd=False) -> None:
+    state.db.execute("INSERT INTO drafts (message_id, draft_mid, folder, rulebook_sha, note, body, "
+                     "subject, created_at, tokens_in, tokens_out, cache_read, cache_write, first_body, flag, bcc, "
+                     f"forwarded, to_override, {', '.join(EMAIL_COLS)}) VALUES ({','.join('?' * (17 + len(EMAIL_COLS)))})",
+                     (mid, draft_mid, d.folder, drafter.sha, note, body, rec.get("subject", ""), _now(),
+                      u.get("in", 0), u.get("out", 0), u.get("cache_read", 0), u.get("cache_write", 0), body,
+                      flag, bcc, int(bool(fwd)), to_override(flag, rec.get("body_text", ""), rec.get("from_email")),
+                      *[e[c] for c in EMAIL_COLS]))
+
+
+def put_draft(box, drafts_folder: str, rec: dict, text: str, cfg: dict, flag: str, bcc: str) -> str:
+    """The draft's copy in the mailbox Drafts folder, and its Message-ID; none ("") for a relayed draft or
+    without a mailbox."""
+    if flag == "relayed" or box is None:   # no mailbox: draft_all.py --db-only
+        return ""
+    raw, draft_mid = D.reply_message(rec, text, cfg["imap"]["user"], bcc)
+    box.append(drafts_folder, "(\\Draft)", imaplib.Time2Internaldate(time.time()), raw)
+    return draft_mid
+
+
+def make_draft(box, drafts_folder: str, rec: dict, mid: str, d, state, drafter, redactor, cfg: dict, log,
+               reason: str = "") -> bool:
+    """Prepare and save in one go (draft_backlog.py); `reason` is the triage reason, for flag_for."""
+    out = prepare(rec, mid, d, drafter, redactor, cfg, log, reason)
     if out is None:
-        return False
-    if out.get("handoff"):
-        note_handoff(state, mid, out, log, rec)
         return False
     return save(box, drafts_folder, rec, mid, d, state, out, drafter, cfg, log)
 
 
-def try_draft(box, drafts_folder: str, rec: dict, mid: str, d, state, drafter, redactor, cfg: dict, log) -> bool:
+def try_draft(box, drafts_folder: str, rec: dict, mid: str, d, state, drafter, redactor, cfg: dict, log,
+              reason: str = "") -> bool:
     try:
-        return make_draft(box, drafts_folder, rec, mid, d, state, drafter, redactor, cfg, log)
+        return make_draft(box, drafts_folder, rec, mid, d, state, drafter, redactor, cfg, log, reason)
     except Exception as exc:   # a missing draft must never hold up the filing
         log(mid, f"no draft ({type(exc).__name__})")
         return False

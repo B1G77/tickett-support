@@ -19,6 +19,8 @@ RAW = (b"Subject: Bilhetes\r\nFrom: Ana Silva <ana@gmail.com>\r\nMessage-ID: <m1
 MID = "<m1@x>"
 BODY = "Olá Ana,\n\nOs bilhetes estão em https://www.tickett.com/conta.\n\nCom os melhores cumprimentos,\nEquipa Tickett"
 ON = {"enabled": True, "daily_limit": 20, "categories": ["F2"]}
+ZERO = {"F1": 0, "F2": 0, "F3": 0, "F4": 0, "F5": 0}   # hours to wait, per category
+OFF = {"enabled": False, "daily_limit": 20, "categories": [], "delay_hours": ZERO}
 
 
 class Box:
@@ -47,14 +49,15 @@ class Drafter:
     sha = "s"
 
 
-def setup(tmp_path, folder="F2", body=BODY, note=""):
+def setup(tmp_path, folder="F2", body=BODY, note="", flag=""):
     st = RT.State(tmp_path / "router.db")
     rec = E.record_from_bytes(RAW, "t")
     d = RT.Decision(folder, False, "claude", "high", "x")
     out = {"reply": "x", "language": "pt-PT", "needs_action": False, "action_note": "", "missing_facts": [],
            "confidence": "high", "usage": {}}
     assert DR.save(Box(), "INBOX.Drafts", rec, MID, d, st, out, Drafter(), CFG, lambda *a: None)
-    st.db.execute("UPDATE drafts SET body=?, note=?, draft_mid='<d1@tickett.com>' WHERE message_id=?", (body, note, MID))
+    st.db.execute("UPDATE drafts SET body=?, note=?, flag=?, draft_mid='<d1@tickett.com>' WHERE message_id=?",
+                  (body, note, flag, MID))
     LG.init(st)
     st.db.execute("INSERT INTO replies (message_id, folder, received_at, from_email) VALUES (?,?,?,?)",
                   (MID, folder, LG._now(), "ana@gmail.com"))
@@ -83,7 +86,7 @@ def draft_row(st):
 
 def test_everything_is_off_by_default(tmp_path):
     st, rec, d = setup(tmp_path)
-    assert AS.settings(st) == {"enabled": False, "daily_limit": 20, "categories": [], "delay_minutes": 0}
+    assert AS.settings(st) == OFF
     ok, logs, sent, box = run(st, rec, d)
     assert ok is False and logs == [] and sent == [] and box.selects == []
     AS.save_settings(st, {"enabled": True, "daily_limit": 20, "categories": []})   # on, but no category
@@ -93,9 +96,10 @@ def test_everything_is_off_by_default(tmp_path):
     assert draft_row(st)["closed_at"] is None
 
 
-def test_refunds_partners_and_review_can_never_be_switched_on(tmp_path):
+def test_review_can_never_be_switched_on_and_refunds_only_for_tickett_refunds(tmp_path):
     st, rec, d = setup(tmp_path)
-    for cats in (["F1"], ["F7"], ["F9"], ["F2", "F9"], ["F8"], ["P"], ["X"], [2], "F2"):
+    assert AS.ALLOWED == ("F1", "F2", "F3", "F4", "F5") and AS.NEVER == ("F9",)
+    for cats in (["F9"], ["F6"], ["F7"], ["F2", "F9"], ["F8"], ["P"], ["X"], [2], "F2"):
         try:
             AS.save_settings(st, {"enabled": True, "daily_limit": 20, "categories": cats})
             raise AssertionError(f"accepted {cats!r}")
@@ -111,17 +115,30 @@ def test_refunds_partners_and_review_can_never_be_switched_on(tmp_path):
             raise AssertionError(f"accepted {bad!r}")
         except ValueError:
             pass
-    assert AS.settings(st) == {"enabled": False, "daily_limit": 20, "categories": [], "delay_minutes": 0}
-    assert AS.save_settings(st, {"enabled": True, "daily_limit": 0, "categories": ["F6", "F2", "F2"]}) == \
-        {"enabled": True, "daily_limit": 0, "categories": ["F2", "F6"], "delay_minutes": 0}
-    # even settings forged straight into the database cannot switch F1 on
+    assert AS.settings(st) == OFF
+    assert AS.save_settings(st, {"enabled": True, "daily_limit": 0, "categories": ["F1", "F2", "F2"]}) == \
+        {"enabled": True, "daily_limit": 0, "categories": ["F1", "F2"], "delay_hours": ZERO}
+    # even settings forged straight into the database cannot switch F9 on
     st.db.execute("INSERT OR REPLACE INTO meta VALUES ('autosend', ?)",
-                  ('{"enabled": true, "daily_limit": 20, "categories": ["F1", "F2"]}',))
+                  ('{"enabled": true, "daily_limit": 20, "categories": ["F9", "F2"]}',))
     st.db.commit()
-    assert AS.settings(st) == {"enabled": False, "daily_limit": 20, "categories": [], "delay_minutes": 0}
+    assert AS.settings(st) == OFF
+    on1 = {**ON, "categories": ["F1"]}
     st1, rec1, d1 = setup(tmp_path / "f1", folder="F1")
-    assert AS.why_not(rec1, draft_row(st1), d1, {**ON, "categories": ["F1"]}, 0, False) == "category not switched on"
-    assert AS.NEVER == ("F1", "F7", "F9")
+    assert AS.why_not(rec1, draft_row(st1), d1, on1, 0, False) == "refunds go out automatically only when Tickett handles them"
+    st2, rec2, d2 = setup(tmp_path / "f1r", folder="F1", flag="tickett_refund")
+    assert AS.why_not(rec2, draft_row(st2), d2, on1, 0, False) == ""
+    st9, rec9, d9 = setup(tmp_path / "f9", folder="F9")
+    assert AS.why_not(rec9, draft_row(st9), d9, {**ON, "categories": ["F9"]}, 0, False) == "category not switched on"
+
+
+def test_a_tickett_refund_goes_out_automatically_with_the_copy_to_finance(tmp_path):
+    st, rec, d = setup(tmp_path, folder="F1", flag="tickett_refund")
+    st.db.execute("UPDATE drafts SET bcc='finance@tickett.com'")
+    st.db.commit()
+    AS.save_settings(st, {**ON, "categories": ["F1"]})
+    ok, logs, sent, box = run(st, rec, d)
+    assert ok is True and logs == ["sent automatically"] and b"Bcc: finance@tickett.com" in sent[0]
 
 
 def test_each_refusal_reason(tmp_path):
@@ -144,6 +161,14 @@ def test_each_refusal_reason(tmp_path):
     assert ok(w={**row, "body": "Olá [NAME],"}) == "draft not sendable"
     assert ok(w={**row, "body": None}) == "draft not sendable"
     assert ok(w={**row, "note": "falta: data do evento"}) == "draft has an internal note"
+    for flag in ("legal", "relayed", "no_answer_in_sources", "person_must_act", "something new"):
+        assert ok(w={**row, "flag": flag}) == f"draft flagged {flag}", flag
+    assert ok(w={**row, "flag": "tickett_refund"}) == "" and ok(w={**row, "flag": None}) == ""
+    assert ok(w={**row, "flag": "relayed", "to_override": "rui@gmail.com"}) == "draft flagged relayed"
+    assert ok(w={**row, "forwarded": 1}) == "forwarded mail: a person sends it"   # even when it is a normal draft
+    fwd = {**rec, "subject": "Fwd: Bilhetes", "body_text": "---------- Forwarded message ---------\n"
+           "From: Tickett <noreply@tickett.com>\nTo: <ana@gmail.com>\n"}
+    assert ok(r=fwd) == "forwarded mail: a person sends it"   # the triage reason, also without the marker
     for link in ("https://evil.com/x", "http://tickett.com.evil.com", "www.evil.com", "https://tickett.com@evil.com",
                  "https://evil.com\\@tickett.com", "HTTPS://EVIL.COM", "https://faketickett.com", "https:///evil.com",
                  "https:\\\\evil.com", "https:evil.com", "https://evil%2ecom", "https://tickett.com/ e www.evil.com"):
@@ -235,9 +260,9 @@ def test_status_shows_settings_sent_today_and_readiness(tmp_path):
     st.db.commit()
     s = AS.status(CFG, st)
     assert s["settings"] == AS.settings(st) and s["sent_today"] == 1   # q2, closed auto today
-    assert [r["folder"] for r in s["readiness"]] == ["F2", "F3", "F4", "F5", "F6"]
-    assert s["readiness"][1] == {"folder": "F3", "name": "3 Pasta 3", "drafts": 2, "unchanged": 1}
-    assert s["readiness"][0]["drafts"] == 0
+    assert [r["folder"] for r in s["readiness"]] == ["F1", "F2", "F3", "F4", "F5"]
+    assert s["readiness"][2] == {"folder": "F3", "name": "3 Pasta 3", "drafts": 2, "unchanged": 1}
+    assert s["readiness"][1]["drafts"] == 0
 
 
 def test_a_draft_claimed_by_the_dashboard_meanwhile_is_not_sent(tmp_path):

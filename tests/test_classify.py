@@ -47,4 +47,21 @@ def test_urgent_definition_is_legal_only():
 def test_the_category_definitions_ship_with_the_code():
     import json
     tax = json.loads(K.TAXONOMY.read_text(encoding="utf-8"))
-    assert "config" in K.TAXONOMY.parts and sorted(f["id"] for f in tax["folders"]) == [f"F{i}" for i in range(1, 10)]
+    assert "config" in K.TAXONOMY.parts and sorted(f["id"] for f in tax["folders"]) == ["F1", "F2", "F3", "F4", "F5",
+                                                                                         "F8", "F9"]
+
+
+def test_shop_and_partner_mail_now_goes_to_a_rever():
+    assert K.FOLDER_IDS == ["F1", "F2", "F3", "F4", "F5", "F8", "F9"]
+    text = lambda t: NS(stop_reason="end_turn", content=[NS(type="text", text=t)])
+    for old in ("F6", "F7"):
+        out = K.parse_response(text('{"folder":"%s","urgent":false,"confidence":"high","reason":"shop"}' % old))
+        assert (out["folder"], out["confidence"]) == ("F9", "high")
+        assert K.current_folder(old) == "F9"
+    assert K.current_folder("F2") == "F2" and K.current_folder(None) is None
+    tax = json.loads(K.TAXONOMY.read_text(encoding="utf-8"))
+    f9 = next(f for f in tax["folders"] if f["id"] == "F9")["definition"].lower()
+    assert all(w in f9 for w in ("merchandise", "organisers", "venues", "promoters", "b2b"))
+    ranked = sorted(tax["folders"], key=lambda f: f["precedence"])
+    assert [f["precedence"] for f in ranked] == list(range(1, len(tax["folders"]) + 1))
+    assert [f["id"] for f in ranked] == ["F8", "F1", "F2", "F3", "F4", "F5", "F9"]   # A Rever is the last fallback

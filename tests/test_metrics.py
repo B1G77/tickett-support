@@ -10,7 +10,7 @@ import ledger as L
 import metrics as M
 import router as RT
 
-CFG = {"folders": {"F1": "1 Cancelamentos e Reembolsos", "F2": "2 Bilhetes não recebidos"},
+CFG = {"folders": {"F1": "1 Cancelamentos e Reembolsos", "F2": "2 Bilhetes não recebidos", "F9": "9 A Rever"},
        "answered_folder": "10 Respondidos", "handoff_folder": "0 Por Responder", "overdue_days": 2,
        "pricing": {"usd_to_eur": 0.5, "per_million_usd": {"m1": {"in": 10, "out": 20, "cache_read": 1,
                                                                  "cache_write": 5}}}}
@@ -160,3 +160,20 @@ def test_from_after_to_is_swapped(tmp_path):
     s = new_state(tmp_path)
     reply(s, "a", "F1", at("2026-03-11"))
     assert run(s, "2026-03-16", "2026-03-10") == run(s, "2026-03-10", "2026-03-16")
+
+
+def test_old_shop_and_partner_history_shows_under_a_rever(tmp_path):
+    import answered as A
+    assert "F6" not in M.OPEN_FOLDERS and "F7" not in M.OPEN_FOLDERS and "F9" in M.OPEN_FOLDERS
+    assert "F6" not in L.COUNTED and "F7" not in L.COUNTED and "F6" not in A.OPEN_FOLDERS and "F7" not in A.OPEN_FOLDERS
+    s = new_state(tmp_path)
+    reply(s, "a", "F6", at("2026-03-11"))
+    reply(s, "b", "F7", at("2026-03-12"))
+    reply(s, "c", "F9", at("2026-03-12"))
+    for mid, folder in (("1", "F6"), ("2", "F7")):
+        s.db.execute("INSERT INTO drafts (message_id, folder, body, first_body, closed_at, closed_how) "
+                     "VALUES (?,?,'x','x',?,'sent')", (mid, folder, at("2026-03-12")))
+    s.db.commit()
+    r = run(s)
+    assert r["categories"] == [{"folder": "F9", "name": "9 A Rever", "n": 3}]
+    assert [(q["folder"], q["drafts"]) for q in r["quality"]] == [("F9", 2)]

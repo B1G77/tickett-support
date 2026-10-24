@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""The support dashboard: reply drafts to send or have rewritten, mail waiting for a person,
-and the health of the stack. Stdlib only.
+"""The support dashboard: a reply draft for every open email, to send, edit, have rewritten or close
+without a reply, and the health of the stack. Stdlib only.
 
 It listens on 127.0.0.1 only; a reverse proxy in front puts it on the network.
 Everyone logs in (two accounts, admin and agent; see auth.py) and
@@ -28,6 +28,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import actions as AC
 import auth
 import autosend as AS
+import drafts as DR
 import metrics
 import router as RT
 from api import health_json, state_json
@@ -128,11 +129,11 @@ class App:
                 drafter, redactor = self.drafter()
                 return {"message": AC.rewrite(self.cfg, st, cid, version, str(body.get("comment", "")), self.log,
                                               drafter, redactor)}
-            if action == "person":
-                return {"message": AC.to_person(self.cfg, st, cid, version, self.log,
-                                                note=str(body.get("comment", ""))[:500])}
             if action == "answered":
-                return {"message": AC.answered_by_hand(self.cfg, st, cid, self.log)}
+                return {"message": AC.answered_by_hand(self.cfg, st, cid, version, self.log)}
+            if action == "to":
+                message, new_version = AC.set_to(self.cfg, st, cid, version, str(body.get("to", ""))[:320], self.log)
+                return {"message": message, "version": new_version}
             if action == "edit":
                 message, new_version = AC.edit(self.cfg, st, cid, version, str(body.get("body", "")), self.log)
                 return {"message": message, "version": new_version}
@@ -297,7 +298,7 @@ def make_handler(app: App):
                     app.log("autosend", json.dumps(saved))
                     self._json(200, AS.status(app.cfg, st))
                     return
-                if action not in ("send", "rewrite", "person", "edit", "answered"):
+                if action not in ("send", "rewrite", "edit", "answered", "to"):
                     self._json(404, {"error": "Não existe."})
                     return
                 self._json(200, app.act(action, self._read()))
@@ -336,6 +337,7 @@ def main() -> int:
     cfg = RT.load_config()
     app = App(cfg)
     try:
+        DR.adopt_handoffs(app.state())   # also before the router's first cycle
         AC.fill_missing(cfg, app.state())
     except Exception:
         traceback.print_exc()

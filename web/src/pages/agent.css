@@ -83,6 +83,9 @@
 /* ---------- cards ---------- */
 
 .card-list { display: grid; gap: 16px; margin: 0; padding: 0; list-style: none; }
+.topic { display: grid; gap: 12px; margin-top: 24px; }
+.section-title { display: flex; align-items: baseline; gap: 8px; font-size: 16px; font-weight: 600; }
+.section-count { color: var(--text-3); font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
 
 .card {
   display: grid;
@@ -132,6 +135,7 @@
   font-weight: 600;
 }
 .badge-reason { border-color: var(--note); background: var(--note-soft); color: var(--note-text); }
+.badge-legal { border-color: var(--error); background: var(--error-soft); color: var(--error); }
 
 .draft-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
 .draft-col { display: grid; align-content: start; gap: 8px; min-width: 0; }
@@ -156,7 +160,6 @@
   overflow-wrap: anywhere;
 }
 .mail-reply { background: var(--surface-2); color: var(--text); border-left: 3px solid var(--accent); }
-.mail-scroll { max-height: 260px; }
 
 .link-btn {
   justify-self: start;
@@ -172,6 +175,9 @@
 
 .to-line { font-size: 13px; color: var(--text-3); overflow-wrap: anywhere; }
 .to-addr { color: var(--text); font-weight: 500; }
+.to-edit { display: grid; gap: 4px; }
+.to-edit .input { flex: 1 1 200px; min-width: 0; }
+.to-hint { font-size: 12px; color: var(--note-text); }
 .warn-line, .blocked-box {
   padding: 8px 12px;
   border: 1px solid var(--error);
@@ -198,7 +204,6 @@
 .note-sub { font-size: 11px; color: var(--text-3); }
 .note-box p { flex-basis: 100%; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
 
-.waiting { font-size: 13px; color: var(--text-2); }
 
 /* ---------- forms in a card ---------- */
 

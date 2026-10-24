@@ -9,10 +9,10 @@ import actions as AC
 import autosend as AS
 import ledger as LG
 import router as RT
-from test_autosend import CFG, MID, ON, RAW, Box, Drafter, Inbox, draft_row, setup
+from test_autosend import CFG, MID, ON, RAW, ZERO, Box, Drafter, Inbox, draft_row, setup
 
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
-LATER = {**ON, "delay_minutes": 60}
+LATER = {**ON, "delay_hours": {**ZERO, "F2": 1}}
 
 
 def iso(t):
@@ -75,23 +75,35 @@ def scheduled(tmp_path):
     return st
 
 
-def test_the_delay_is_one_of_the_allowed_values_and_defaults_to_zero(tmp_path):
+def test_the_wait_is_hours_per_category_and_defaults_to_zero(tmp_path):
     st, _, _ = setup(tmp_path)
-    assert AS.settings(st)["delay_minutes"] == 0
-    st.db.execute("INSERT OR REPLACE INTO meta VALUES ('autosend', ?)",   # saved before the delay existed
-                  ('{"enabled": true, "daily_limit": 20, "categories": ["F2"]}',))
+    assert AS.settings(st)["delay_hours"] == ZERO
+    st.db.execute("INSERT OR REPLACE INTO meta VALUES ('autosend', ?)",   # saved with the old slider in minutes
+                  ('{"enabled": true, "daily_limit": 20, "categories": ["F2"], "delay_minutes": 60}',))
     st.db.commit()
-    assert AS.settings(st) == {**ON, "delay_minutes": 0}
-    assert AS.DELAYS == (0, 15, 30, 60, 120, 180, 240, 360, 480, 720, 1440)
-    for m in AS.DELAYS:
-        assert AS.save_settings(st, {**ON, "delay_minutes": m})["delay_minutes"] == m
-    for bad in (5, -15, 1441, 2880, "60", 60.0, True, None, [60]):
+    assert AS.settings(st) == {**ON, "delay_hours": ZERO}
+    assert AS.save_settings(st, {**ON, "delay_hours": {"F3": 5}})["delay_hours"] == {**ZERO, "F3": 5}   # rest 0
+    for h in (0, 1, 24, 720):
+        assert AS.save_settings(st, {**ON, "delay_hours": {**ZERO, "F1": h}})["delay_hours"]["F1"] == h
+    for bad in ({"F2": -1}, {"F2": 721}, {"F2": "1"}, {"F2": 1.0}, {"F2": True}, {"F2": None}, {"F9": 1},
+                {"F6": 1}, [1], "F2", 5, None):
         try:
-            AS.save_settings(st, {**ON, "delay_minutes": bad})
+            AS.save_settings(st, {**ON, "delay_hours": bad})
             raise AssertionError(f"accepted {bad!r}")
         except ValueError as exc:
-            assert str(exc) == "Atraso não permitido.", bad
-    assert AS.settings(st)["delay_minutes"] == 1440
+            assert str(exc) == "Atraso inválido (0 a 720 horas).", bad
+    assert AS.settings(st)["delay_hours"] == {**ZERO, "F1": 720}
+
+
+def test_each_category_waits_its_own_hours(tmp_path):
+    st, rec, d = setup(tmp_path, folder="F3")
+    AS.save_settings(st, {**ON, "categories": ["F2", "F3"], "delay_hours": {**ZERO, "F2": 5}})
+    seen(st, NOW)
+    assert run(st, rec, d)[:2] == (True, ["sent automatically"])   # F3 waits 0 hours
+    st2, rec2, d2 = setup(tmp_path / "b")
+    AS.save_settings(st2, {**ON, "categories": ["F2", "F3"], "delay_hours": {**ZERO, "F2": 5}})
+    seen(st2, NOW)
+    assert run(st2, rec2, d2)[0] is False and draft_row(st2)["auto_after"] == iso(NOW + timedelta(hours=5))
 
 
 def test_a_draft_not_yet_due_is_scheduled_and_not_sent(tmp_path):
@@ -241,13 +253,13 @@ def test_the_router_schedules_and_then_calls_send_due_at_the_end(tmp_path):
 
 def test_a_changed_delay_moves_a_scheduled_draft_both_ways(tmp_path):
     st = scheduled(tmp_path)   # due at NOW + 60 min
-    AS.save_settings(st, {**LATER, "delay_minutes": 120})
+    AS.save_settings(st, {**LATER, "delay_hours": {**ZERO, "F2": 2}})
     n, logs, sent, box = due(st, now=NOW + timedelta(minutes=61))
     at = (NOW + timedelta(minutes=120)).astimezone().strftime("%H:%M")
     assert n == 0 and sent == [] and box.selects == [] and logs == [(MID, f"automatic send rescheduled for {at}")]
     assert draft_row(st)["auto_after"] == iso(NOW + timedelta(minutes=120))
     assert due(st, now=NOW + timedelta(minutes=61))[1] == []   # logged once
-    AS.save_settings(st, {**LATER, "delay_minutes": 15})
+    AS.save_settings(st, {**LATER, "delay_hours": ZERO})
     n, logs, sent, _ = due(st, now=NOW + timedelta(minutes=20))   # a shorter wait releases it earlier
     assert n == 1 and len(sent) == 1 and logs == [(MID, "sent automatically")]
 
@@ -318,13 +330,13 @@ def test_an_edit_racing_an_automatic_send_is_stale_and_leaves_the_sent_row(tmp_p
     assert box.appended == ["INBOX.Drafts"] and box.deleted == []   # the new copy was looked for again, not the old
 
 
-def test_to_person_after_an_automatic_send_is_stale_and_keeps_closed_how(tmp_path):
+def test_tratado_sem_resposta_after_an_automatic_send_is_stale_and_keeps_closed_how(tmp_path):
     st = scheduled(tmp_path)
+    version = draft_row(st)["created_at"]
+    assert AC.claim(st, draft_row(st), "auto")   # the router sends it first
     try:
-        AC.to_person(CFG, st, AC.card_id(MID), draft_row(st)["created_at"], lambda *a: None,
-                     connect=lambda cfg: Claims(st))
+        AC.answered_by_hand(CFG, st, AC.card_id(MID), version, lambda *a: None, connect=lambda cfg: Folder())
         raise AssertionError("should be stale")
     except AC.Stale:
         pass
     assert draft_row(st)["closed_how"] == "auto" and AS.sent_today(st) == 1
-    assert st.db.execute("SELECT COUNT(*) FROM handoffs").fetchone()[0] == 0

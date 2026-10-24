@@ -147,8 +147,31 @@ def test_the_events_document_is_in_the_cached_system_block_after_the_terms():
     assert block.index("TERMS-XYZ") < block.index("DOC-XYZ") and "<events_document>" in block
 
 
-def test_a_handoff_needs_no_reply_and_always_has_a_reason():
-    out = D.parse_response(resp({**GOOD, "reply": "x", "handoff": True, "handoff_reason": "",
-                                 "action_note": "reembolso tratado pela Tickett"}))
-    assert out["handoff"] and out["reply"] == "" and out["handoff_reason"] == "no_answer_in_sources"
-    assert D.parse_response(resp({**GOOD, "handoff": False, "handoff_reason": ""}))["reply"]
+def test_there_is_always_a_reply_and_a_flag_instead_of_a_hand_off():
+    assert D.FLAGS == ["", "tickett_refund", "no_answer_in_sources", "person_must_act"]
+    props = D.SCHEMA["properties"]
+    assert props["flag"]["enum"] == D.FLAGS and "flag" in D.SCHEMA["required"]
+    assert "handoff" not in props and "handoff_reason" not in props
+    out = D.parse_response(resp({**GOOD, "flag": "tickett_refund"}))
+    assert out["flag"] == "tickett_refund" and out["reply"] == "O reembolso é automático."
+    assert D.parse_response(resp(GOOD))["flag"] == ""   # no flag given: a normal answer
+    assert D.parse_response(resp({**GOOD, "flag": "whatever"}))["flag"] == "no_answer_in_sources"   # unknown: careful
+    assert D.parse_response(resp({**GOOD, "reply": " ", "flag": "tickett_refund"})) is None   # nothing to draft
+    system = D.system_prompt("R", "T")
+    assert "flag" in system and "handoff" not in system and "Always write a reply" in system
+
+
+def test_a_bcc_goes_in_a_header_of_the_message_only_when_given():
+    rec = {"subject": "Reembolso", "from_email": "ana@gmail.com", "message_id": "<m2@x>"}
+    m = email.message_from_bytes(D.reply_message(rec, "x", "support@tickett.com", "finance@tickett.com")[0],
+                                 policy=email.policy.default)
+    assert m["Bcc"] == "finance@tickett.com" and m["To"] == "ana@gmail.com"
+    assert email.message_from_bytes(D.reply_message(rec, "x", "support@tickett.com")[0])["Bcc"] is None
+
+
+def test_relayed_and_person_flags_leave_a_note_for_the_team():
+    text, body, note = D.compose({**GOOD, "flag": "relayed"}, "Ana")
+    assert note == "Email reencaminhado: confirme o endereço do cliente em Para: antes de enviar." and text.startswith(D.NOTE)
+    note = D.compose({**GOOD, "flag": "person_must_act", "action_note": "verificar o pagamento"}, "Ana")[2]
+    assert note == "verificar o pagamento"
+    assert D.compose({**GOOD, "flag": "tickett_refund"}, "Ana")[2] == ""   # may go out without a person

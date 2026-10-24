@@ -18,25 +18,17 @@ export type Draft = {
   rewrites: number;
   edited: boolean;
   auto_at: string; // "HH:MM" (or "dd/mm HH:MM") when it goes out automatically, else ""
-};
-
-export type Person = {
-  id: string;
-  subject: string;
-  from_name: string;
-  from_email: string;
-  received: string;
-  reason: string;
-  note: string;
-  since: string;
-  text: string;
+  flag: string; // "", tickett_refund, no_answer_in_sources, person_must_act, legal or relayed
+  bcc: string; // blind copy the reply goes with (finance, for refunds Tickett handles), else ""
+  sort: string; // the tab's order key: when the customer's email arrived
+  to_override: string; // relayed mail: the customer's address in Para: (found in the text or typed), else ""
+  refusal: string; // "" when Enviar may send at all, else why not (relayed mail without a valid Para:)
 };
 
 export type AppState = {
   generated_at: string;
   mailbox: string;
   drafts: Draft[];
-  people: Person[];
   health: { overall: "ok" | "warn" | "bad" };
   numbers: Record<string, number | null>;
 };

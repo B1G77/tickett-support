@@ -23,7 +23,7 @@ import drafts as DR
 import ledger as LG
 from imap_util import Mailbox
 
-OPEN_FOLDERS = ("F1", "F2", "F3", "F4", "F5", "F6", "F7", "F9")   # 8 Não-cliente needs no answer
+OPEN_FOLDERS = ("F1", "F2", "F3", "F4", "F5", "F9")   # 8 Não-cliente needs no answer
 
 
 def get_meta(state, key: str) -> str | None:

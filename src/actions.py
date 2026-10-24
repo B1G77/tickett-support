@@ -3,10 +3,10 @@
 
   send       the reply goes out from the support mailbox (SMTP), a copy is saved in Sent
              and the draft leaves Drafts; the router then files the email as answered
-  rewrite    Claude writes a new version following the person's comment (or hands it off)
-  to_person  the person answers it themselves: the email moves to the hand-off folder
-             and the draft is removed
-  answered_by_hand  the person has answered a hand-off: the email moves to the answered folder
+  rewrite    Claude writes a new version following the person's comment (flag and Bcc stay as they were)
+  edit       the person's own text replaces the draft
+  answered_by_hand  "Tratado sem resposta": the email is closed without a reply and moves to the
+             answered folder; the draft is closed and leaves Drafts
 
 Every action names the draft version the person saw; if the draft changed since, nothing
 happens. A draft with the internal note or a placeholder still in it is never sent.
@@ -14,6 +14,7 @@ happens. A draft with the internal note or a placeholder still in it is never se
 from __future__ import annotations
 
 import email
+import email.policy
 import hashlib
 import imaplib
 import smtplib
@@ -27,6 +28,7 @@ import drafter as D
 import drafts as DR
 import extract as E
 import ledger as LG
+import relay as RL
 import router as RT
 
 SMTP_PORT = 465
@@ -51,6 +53,18 @@ def sendable(body: str) -> str:
     return ""
 
 
+NO_TO = "Escreva o endereço do cliente em Para: antes de enviar."
+BAD_TO = "Escreva um só endereço de email do cliente (não o do parceiro nem um @tickett.com)."
+
+
+def refusal(row: dict) -> str:
+    """"" when Enviar may send this draft at all, else why not: a relayed email's sender is the partner or the
+    website form, so it goes only to one valid customer address in Para: (to_override)."""
+    if row.get("flag") == "relayed" and not RL.valid(row.get("to_override") or "", row.get("from_email") or ""):
+        return NO_TO
+    return ""
+
+
 BAD_REPLY_TO = "O endereço de resposta não é válido. Responda pelo Mail."
 
 
@@ -62,7 +76,10 @@ def reply_to_ok(row: dict) -> bool:
 
 def recipient(row: dict) -> str:
     """Where a reply to this email goes: its Reply-To, else the sender (as drafter.reply_message);
-    a Reply-To that is not one address is shown as it is (such a draft is never sent from here)."""
+    a Reply-To that is not one address is shown as it is (such a draft is never sent from here). A relayed
+    draft goes to its Para: address."""
+    if row.get("flag") == "relayed":
+        return (row.get("to_override") or "").strip()
     raw = (row.get("reply_to") or "").strip()
     if not raw:
         return row.get("from_email") or ""
@@ -82,6 +99,7 @@ def _rows(state, sql: str, args=()) -> list[dict]:
 
 
 def pending(state) -> list[dict]:
+    """Every open draft, oldest customer email first. Read only (old hand-offs get theirs in ledger.after_cycle)."""
     DR.init(state)
     return _rows(state, "SELECT * FROM drafts WHERE sent_at IS NULL AND closed_at IS NULL "
                  "ORDER BY COALESCE(NULLIF(received_at, ''), created_at)")
@@ -122,17 +140,24 @@ def _close(state, mid: str, how: str) -> None:
     state.db.commit()
 
 
+def _places(folders: dict, row: dict) -> list[str]:
+    """Where the email a draft answers may wait: its category folder, and 0 Por Responder (old hand-offs)."""
+    return [enc for enc in dict.fromkeys([folders.get(row["folder"]), folders.get(RT.HANDOFF)]) if enc]
+
+
 def _original(box, folders: dict, row: dict) -> tuple[dict, bytes] | tuple[None, None]:
     """The email the draft answers, while it still waits in its folder: (record, uid)."""
-    enc = folders.get(row["folder"])
-    if not enc:
-        return None, None
-    box.select(enc, readonly=True)
-    uids = box.find(row["message_id"])
-    return (E.record_from_bytes(box.fetch(uids[0]), "imap:dashboard"), uids[0]) if uids else (None, None)
+    for enc in _places(folders, row):
+        box.select(enc, readonly=True)
+        uids = box.find(row["message_id"])
+        if uids:
+            return E.record_from_bytes(box.fetch(uids[0]), "imap:dashboard"), uids[0]
+    return None, None
 
 
 def _delete_draft(box, draft_mid: str) -> None:
+    if not draft_mid:   # a relayed draft lives on the dashboard only
+        return
     box.select(A._special(box, "\\Drafts", "Drafts"))
     for uid in box.find(draft_mid or ""):
         box.delete(uid)
@@ -140,14 +165,19 @@ def _delete_draft(box, draft_mid: str) -> None:
 
 def smtp_send(cfg: dict, raw: bytes) -> None:
     i = cfg["imap"]
-    to = [a for _, a in getaddresses(email.message_from_bytes(raw).get_all("To", [])) if a]
+    msg = email.message_from_bytes(raw, policy=email.policy.default)
+    to = [a for _, a in getaddresses(msg.get_all("To", [])) if a]
+    bcc = [a for _, a in getaddresses(msg.get_all("Bcc", [])) if a]
     if not to:
         raise ValueError("no recipient")
+    if msg.get_all("Bcc"):   # in the envelope only: the customer's copy carries no Bcc header
+        del msg["Bcc"]
+        raw = msg.as_bytes()
     s = smtplib.SMTP_SSL(i.get("smtp_host", i["host"]), i.get("smtp_port", SMTP_PORT), timeout=60,
                          context=ssl.create_default_context())
     try:
         s.login(i["user"], RT.keychain_password(i["keychain_service"], i["user"]))
-        s.sendmail(i["user"], to, raw)
+        s.sendmail(i["user"], to + bcc, raw)
     finally:
         try:   # once sendmail returned the mail has left: a failed goodbye must not count as a failed send
             s.quit()
@@ -174,9 +204,16 @@ def claim(state, row: dict, how: str, scheduled: bool = False) -> bool:
 def claim_and_send(cfg, state, row: dict, rec: dict, how: str, send_mail=smtp_send, scheduled: bool = False) -> bytes:
     """Claim the draft, then mail it to the sender of `rec`; Stale when another caller has it. A failed SMTP
     send opens the draft again. Returns the message sent."""
-    if not reply_to_ok(rec):
+    to = ""
+    if row.get("flag") == "relayed" and how == "auto":   # autosend.why_not refuses it too
+        raise ValueError("Um email reencaminhado nunca é enviado automaticamente.")
+    if row.get("flag") == "relayed":   # only to the customer's address in Para:, checked against today's sender
+        to = (row.get("to_override") or "").strip()
+        if not RL.valid(to, rec.get("from_email") or "") or refusal(row):
+            raise ValueError(NO_TO)
+    elif not reply_to_ok(rec):
         raise ValueError(BAD_REPLY_TO)
-    raw, _ = D.reply_message(rec, row["body"], cfg["imap"]["user"])
+    raw, _ = D.reply_message(rec, row["body"], cfg["imap"]["user"], row.get("bcc") or "", to)
     if not claim(state, row, "auto" if how == "auto" else "sent", scheduled):
         raise Stale("Este rascunho mudou ou já foi tratado. A página foi atualizada.")
     try:
@@ -209,6 +246,8 @@ def deliver(cfg, state, box, row: dict, rec: dict, log, how: str, send_mail=smtp
 
 def send(cfg, state, cid: str, version: str, log, connect=RT.connect, send_mail=smtp_send) -> str:
     row = _row(state, cid, version)
+    if refusal(row):
+        raise ValueError(refusal(row))
     why = sendable(row["body"] or "")
     if why:
         raise ValueError(f"Não pode ser enviado: {why}.")
@@ -223,55 +262,70 @@ def send(cfg, state, cid: str, version: str, log, connect=RT.connect, send_mail=
     finally:
         box.logout()
     log(row["message_id"], "reply sent from the dashboard")
-    return f"Enviado para {recipient(rec) or 'o cliente'}."
+    to = recipient(row) if row.get("flag") == "relayed" else recipient(rec)
+    return f"Enviado para {to or 'o cliente'}."
 
 
-def to_person(cfg, state, cid: str, version: str, log, connect=RT.connect, note: str = "",
-              reason: str = "person_must_act") -> str:
+def set_to(cfg, state, cid: str, version: str, to: str, log) -> tuple[str, str]:
+    """The person's customer address for a relayed draft (Para:), saved as a new version: (message, version).
+    Marked to_set_by_person (not edited: the reply text is the AI's), so a later draft never replaces it."""
     row = _row(state, cid, version)
-    _stop_auto(state, row["message_id"])
-    box = connect(cfg)
+    if row.get("flag") != "relayed":
+        raise ValueError("Só um email reencaminhado tem Para: editável.")
+    to = (to or "").strip()
+    if to and not RL.valid(to, row.get("from_email") or ""):
+        raise ValueError(BAD_TO)
+    new_version = DR._now()
+    if not _replace(state, row, "to_override=?, to_set_by_person=1, created_at=?", (to, new_version)):
+        raise Stale(STALE)
+    log(row["message_id"], "customer address set from the dashboard" if to else "customer address cleared")
+    return "Endereço guardado.", new_version
+
+
+MOVE_FAILED = "Não foi possível mover o email no servidor de correio. Nada foi alterado; tente outra vez."
+
+
+def answered_by_hand(cfg, state, cid: str, version: str, log, connect=RT.connect) -> str:
+    """Tratado sem resposta: the email is closed without a reply. The draft is claimed first (so nothing is sent
+    automatically meanwhile), then the email moves to the answered folder; only then is it recorded as answered
+    and the draft taken out of Drafts. A failed move opens the draft again and records nothing."""
+    row = _row(state, cid, version)
+    mid = row["message_id"]
+    _stop_auto(state, mid)   # the person chose not to send it: no scheduled send may take it, even after a failure
+    if not claim(state, row, "answered"):   # sent automatically meanwhile: its record stays as it is
+        raise Stale(STALE)
+    box = None
     try:
+        box = connect(cfg)
         folders = box.ensure_folders(RT.folder_names(cfg))
-        rec, uid = _original(box, folders, row)
-        if rec is not None and RT.HANDOFF in folders:
-            box.select(folders[row["folder"]])
-            for u in box.find(row["message_id"]):
-                box.move(u, folders[RT.HANDOFF])
+        for enc in _places(folders, row):
+            box.select(enc)
+            uids = box.find(mid)
+            for u in uids:
+                box.move(u, folders[RT.ANSWERED])
+            if uids:
+                break
+    except Exception as exc:
+        state.db.execute("UPDATE drafts SET closed_at=NULL, closed_how=NULL WHERE message_id=? AND closed_how='answered'",
+                         (mid,))
+        state.db.commit()
+        if box is not None:
+            try:   # a failed goodbye must not hide the real error
+                box.logout()
+            except Exception:
+                pass
+        log(mid, f"not closed: the move failed ({type(exc).__name__})")
+        raise ValueError(MOVE_FAILED) from exc
+    try:
+        DR.mark_answered(state, mid)   # an old hand-off row is closed too
+        state.db.execute("UPDATE decisions SET folder=? WHERE message_id=?", (RT.ANSWERED, mid))
+        state.db.commit()
+        LG.note_answered(state, mid, "respondido", log)
         _delete_draft(box, row["draft_mid"])
     finally:
         box.logout()
-    if not claim(state, row, "person"):   # sent automatically meanwhile: its record stays as it is
-        raise Stale(STALE)
-    state.db.execute("UPDATE decisions SET folder=? WHERE message_id=?", (RT.HANDOFF, row["message_id"]))
-    state.db.execute("UPDATE threads SET folder=? WHERE ref=?", (RT.HANDOFF, row["message_id"]))
-    state.db.commit()
-    DR.note_handoff(state, row["message_id"], {"handoff_reason": reason,
-                                               "action_note": note or "Passado para uma pessoa no painel."}, log, rec)
-    return "Passou para 0 Por Responder."
-
-
-def answered_by_hand(cfg, state, cid: str, log, connect=RT.connect) -> str:
-    """A hand-off the person has answered: the email leaves the hand-off folder for the answered one."""
-    row = next((r for r in waiting_for_person(state) if card_id(r["message_id"]) == cid), None)
-    if row is None:
-        raise Stale("Este email já foi tratado. A página foi atualizada.")
-    mid = row["message_id"]
-    box = connect(cfg)
-    try:
-        folders = box.ensure_folders(RT.folder_names(cfg))
-        if RT.HANDOFF in folders and RT.ANSWERED in folders:
-            box.select(folders[RT.HANDOFF])
-            for u in box.find(mid):
-                box.move(u, folders[RT.ANSWERED])
-    finally:
-        box.logout()
-    DR.mark_answered(state, mid)
-    state.db.execute("UPDATE decisions SET folder=? WHERE message_id=?", (RT.ANSWERED, mid))
-    state.db.commit()
-    LG.note_answered(state, mid, "respondido", log)
-    log(mid, "marked as answered from the dashboard")
-    return "Marcado como respondido."
+    log(mid, "closed without a reply from the dashboard")
+    return f"Tratado sem resposta: passou para {cfg['answered_folder']}."
 
 
 def rewrite(cfg, state, cid: str, version: str, comment: str, log, drafter, redactor,
@@ -302,26 +356,25 @@ def rewrite(cfg, state, cid: str, version: str, comment: str, log, drafter, reda
         if out is None:
             raise ValueError("A resposta do modelo não pôde ser usada. Tente outra vez.")
         DR._usage(state, "rewrite", out, cfg.get("model", D.MODEL), log)
-        if out.get("handoff"):
-            box.logout()
-            box = None
-            return to_person(cfg, state, cid, version, log, connect,
-                             note=out.get("action_note", ""), reason=out.get("handoff_reason") or "person_must_act")
-        text, body, note = D.compose(out, D.first_name(rec.get("from_name", "")))
-        raw, draft_mid = D.reply_message(rec, text, cfg["imap"]["user"])
-        box.append(A._special(box, "\\Drafts", "Drafts"), "(\\Draft)", imaplib.Time2Internaldate(time.time()), raw)
+        flag, bcc = row.get("flag") or "", row.get("bcc") or ""   # a draft keeps its flag and Bcc through a rewrite
+        if DR.placeholder(row):   # an empty one takes the model's verdict, as drafts.save does
+            model = out.get("flag") or ""
+            flag = flag if flag in ("relayed", "legal") else model
+            bcc = cfg.get("refund_bcc", "") if model == "tickett_refund" else ""
+        out["flag"] = flag
+        text, body, note = D.compose(out, DR.greet_name(flag, rec))
+        draft_mid = DR.put_draft(box, A._special(box, "\\Drafts", "Drafts"), rec, text, cfg, flag, bcc)
         u = out.get("usage", {})
-        if not _replace(state, row, "draft_mid=?, rulebook_sha=?, note=?, body=?, created_at=?, "
-                        "tokens_in=tokens_in+?, tokens_out=tokens_out+?, rewrites=rewrites+1, "
+        if not _replace(state, row, "draft_mid=?, rulebook_sha=?, note=?, body=?, created_at=?, flag=?, bcc=?, "
+                        "tokens_in=COALESCE(tokens_in,0)+?, tokens_out=COALESCE(tokens_out,0)+?, rewrites=rewrites+1, "
                         "cache_read=COALESCE(cache_read,0)+?, cache_write=COALESCE(cache_write,0)+?",
-                        (draft_mid, drafter.sha, note, body, DR._now(), u.get("in", 0), u.get("out", 0),
+                        (draft_mid, drafter.sha, note, body, DR._now(), flag, bcc, u.get("in", 0), u.get("out", 0),
                          u.get("cache_read", 0), u.get("cache_write", 0))):
             _delete_draft(box, draft_mid)   # handled meanwhile: the new copy goes too
             raise Stale(STALE)
         _delete_draft(box, row["draft_mid"])
     finally:
-        if box is not None:
-            box.logout()
+        box.logout()
     log(row["message_id"], "rewritten from the dashboard" + (f" - nota: {note}" if note else ""))
     return "Nova versão pronta."
 
@@ -342,8 +395,8 @@ def edit(cfg, state, cid: str, version: str, body: str, log, connect=RT.connect)
         if rec is None:
             _close(state, row["message_id"], "gone")
             raise Stale("O email já não está à espera de resposta (foi respondido ou movido).")
-        raw, draft_mid = D.reply_message(rec, body, cfg["imap"]["user"])
-        box.append(A._special(box, "\\Drafts", "Drafts"), "(\\Draft)", imaplib.Time2Internaldate(time.time()), raw)
+        draft_mid = DR.put_draft(box, A._special(box, "\\Drafts", "Drafts"), rec, body, cfg, row.get("flag") or "",
+                                 row.get("bcc") or "")
         new_version = DR._now()
         if not _replace(state, row, "draft_mid=?, body=?, edited=1, created_at=?", (draft_mid, body, new_version)):
             _delete_draft(box, draft_mid)   # handled meanwhile: the new copy goes too

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """One-off: write reply drafts for the mail that was waiting before drafting went live.
 
-Looks at the same folders as the "Por responder" digest (folders 1-7, mail
-since route_since), keeps the newest message of each conversation, and
-drafts it exactly like the router does: same rules (drafts.qualifies), same
-redaction, same Drafts folder, same drafts table. Red-flagged (legal) mail
-is skipped. Holds the router's lock while it runs, so the router waits.
+Looks at the draft folders (1-5 and 9, mail since route_since), keeps the
+newest message of each conversation, and drafts it exactly like the router
+does: same rules (drafts.qualifies), same flags (red-flagged mail is legal),
+same redaction, same Drafts folder, same drafts table. Holds the router's
+lock while it runs, so the router waits.
 
 Usage: draft_backlog.py --plan | --apply
 """
@@ -75,12 +75,12 @@ def main() -> int:
     for rec in newest_per_conversation(found):
         bucket, why = T.classify(rec)
         d = RT.Decision(rec["_fid"], rec["_urgent"], "backlog", "high", "")
-        if DR.qualifies(d, bucket, state, rec["message_id"], why):
-            todo.append((rec, d))
+        if DR.qualifies(d, bucket, state, rec["message_id"]):
+            todo.append((rec, d, why))
         else:
-            skipped["flagged" if rec["_urgent"] else "already drafted" if DR.has_draft(state, rec["message_id"])
+            skipped["already drafted" if DR.has_draft(state, rec["message_id"])
                     else f"not drafted ({bucket}: {why[:40]})"] += 1
-    by_folder = Counter(cfg["folders"][d.folder] for _, d in todo)
+    by_folder = Counter(cfg["folders"][d.folder] for _, d, _ in todo)
     print(f"{len(found)} open messages, {len(found) - len(newest_per_conversation(found))} older ones in the same "
           f"conversation, {len(todo)} to draft:")
     for name, n in sorted(by_folder.items()):
@@ -96,8 +96,9 @@ def main() -> int:
         redactor = RT.build_redactor()
         drafts_folder = A._special(box, "\\Drafts", "Drafts")
         done = 0
-        for i, (rec, d) in enumerate(todo, 1):
-            done += DR.try_draft(box, drafts_folder, rec, rec["message_id"], d, state, drafter, redactor, cfg, log)
+        for i, (rec, d, why) in enumerate(todo, 1):
+            done += DR.try_draft(box, drafts_folder, rec, rec["message_id"], d, state, drafter, redactor, cfg, log,
+                                 why)
             print(f"\r{i}/{len(todo)} drafted {done}", end="", flush=True)
         print()
         log("backlog", f"backlog drafts written: {done} of {len(todo)}")

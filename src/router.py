@@ -3,7 +3,7 @@
 
 One pass, run every couple of minutes by launchd:
   1. log in over IMAPS (password from the macOS Keychain, never a file)
-  2. make sure the nine folders exist
+  2. make sure the router's folders exist
   3. for each message in INBOX:
        rules first    phishing / spam / platform / vendor / internal -> 8 Não-cliente
                       a short thank-you asking nothing more -> 10 Respondidos
@@ -38,6 +38,7 @@ from pathlib import Path
 import answered as A
 import autosend as AS
 import cases as K
+import classify as C
 import dashboard as DB
 import drafts as DR
 import extract as E
@@ -170,7 +171,9 @@ class State:
               undone_at TEXT, purged_at TEXT, override INT DEFAULT 0, failures INT DEFAULT 0);
             CREATE TABLE IF NOT EXISTS threads (ref TEXT PRIMARY KEY, folder TEXT);
             CREATE TABLE IF NOT EXISTS inbox_seen (message_id TEXT PRIMARY KEY, seen_at TEXT);
-            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);""")
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+            UPDATE decisions SET folder='F9' WHERE folder IN ('F6', 'F7');
+            UPDATE threads SET folder='F9' WHERE folder IN ('F6', 'F7');""")
 
     def first_sight(self, mid: str) -> bool:
         """True the first time an unmatched Inbox message is seen, so it is logged
@@ -225,7 +228,7 @@ def rule_decision(rec: dict, rules: dict | None, urgent: bool) -> Decision | Non
     if re.search(rules["cancelled_events"], text) and re.search(rules["refund_words"], text):
         return Decision("F1", urgent, "rule", "high", "refund or cancellation of a known cancelled event")
     if re.search(rules["merch_words"], text):
-        return Decision("F6", urgent, "rule", "high", "merchandise order")
+        return Decision("F9", urgent, "rule", "high", "merchandise order")
     return None
 
 
@@ -233,7 +236,7 @@ def decide(rec: dict, state: State, redactor, classifier, rules: dict | None = N
     """Folder for one message, or None to leave it in the Inbox (rules-only mode)."""
     bucket, why = T.classify(rec)
     if bucket == "phishing":
-        inherited = state.thread_folder(refs(rec))
+        inherited = C.current_folder(state.thread_folder(refs(rec)))
         if inherited:   # never bin a reply in a known conversation; a person will see it there
             return Decision(inherited, False, "thread", "high", f"reply in an already-filed conversation ({why})")
         return Decision("F8", False, "rule", "high", why, phishing=T.safe_to_purge(why))
@@ -242,7 +245,7 @@ def decide(rec: dict, state: State, redactor, classifier, rules: dict | None = N
     urgent = urgent_hint(new_text(rec))
     if bucket == "customer" and not urgent and closing(new_body(rec)):
         return Decision(ANSWERED, False, "rule", "high", "thank-you or closing, nothing to answer")
-    inherited = state.thread_folder(refs(rec))
+    inherited = C.current_folder(state.thread_folder(refs(rec)))
     if inherited:
         return Decision(inherited, urgent, "thread", "high", "reply in an already-filed conversation")
     if classifier is None:   # no API key yet: nothing leaves the Mac, unmatched mail stays put
@@ -262,7 +265,7 @@ def decide(rec: dict, state: State, redactor, classifier, rules: dict | None = N
         return Decision("F9", urgent, "rule", "low", "no request text")
     out = classifier.classify(case)
     LG.note_usage(state, "classify", out.get("model", ""), out.get("usage", {}))
-    folder = out["folder"] if out.get("confidence") in ("high", "medium") else "F9"
+    folder = C.current_folder(out["folder"]) if out.get("confidence") in ("high", "medium") else "F9"
     urgent = bool(out.get("urgent")) or urgent
     if folder == "F8" and urgent:   # a legal letter must not be buried with the scams; a person checks it
         folder = "F9"
@@ -395,30 +398,21 @@ def file_inbox(box: Mailbox, state: State, log: Log, cfg: dict, dry_run: bool) -
                  f"via {d.source}/{d.confidence}: {d.reason}")
         if dry_run:
             continue
-        out = None
+        out, drafting = None, False
         if drafter is not None:
             bucket, why = T.classify(rec)
-            if DR.qualifies(d, bucket, state, mid, why):
-                out = DR.prepare(rec, mid, d, drafter, redactor, cfg, log)
-            elif DR.relayed(d, why):
-                out = {"handoff": True, "handoff_reason": "person_must_act",
-                       "action_note": f"Sem resposta automática ({why}): responder diretamente ao cliente."}
-        d = to_person(d, out, names)
+            drafting = DR.qualifies(d, bucket, state, mid)   # legal and relayed mail too, flagged as such
+            out = DR.prepare(rec, mid, d, drafter, redactor, cfg, log, why) if drafting else None
         if d.urgent:
             box.flag(uid)   # flags travel with the message when it moves
         box.move(uid, folders[d.folder])
         state.record(mid, refs(rec), d, moved=True)
         LG.note_received(state, mid, rec, d.folder, LG.event_names(), log)
         moved += 1
-        if out is not None and out.get("handoff"):
-            DR.note_handoff(state, mid, out, log, rec)
-        elif d.folder == HANDOFF:   # legal mail: no draft was asked for
-            DR.note_handoff(state, mid, {"handoff_reason": "legal",
-                                         "action_note": "Assunto legal (advogado, livro de reclamações, chargeback): "
-                                                        "responder com cuidado."}, log, rec)
-        elif out is not None:
-            if DR.save(box, drafts_folder, rec, mid, d, state, out, drafter, cfg, log):
-                AS.maybe_send(cfg, state, box, rec, mid, d, log)
+        if out is not None and DR.save(box, drafts_folder, rec, mid, d, state, out, drafter, cfg, log):
+            AS.maybe_send(cfg, state, box, rec, mid, d, log)
+        elif drafting and not DR.has_draft(state, mid):   # the card still shows, with an empty reply to write
+            DR.save_empty(state, rec, mid, d, log, why)
     if not dry_run:
         A.daily_draft(box, state, cfg, folders, log)
         purge_phishing(box, state, cfg, folders, log)
@@ -427,21 +421,6 @@ def file_inbox(box: Mailbox, state: State, log: Log, cfg: dict, dry_run: bool) -
         LG.after_cycle(state, cfg, log)
         AS.send_due(cfg, state, box, log)
     return moved
-
-
-def to_person(d: Decision, out: dict | None, names: dict[str, str]) -> Decision:
-    """Mail a person must answer goes to the hand-off folder: what the drafter handed off, and
-    legal (urgent) customer mail. The conversation is remembered there, so follow-ups join it."""
-    if HANDOFF not in names or d.folder in ("F8", ANSWERED, HANDOFF):
-        return d
-    if out is not None and out.get("handoff"):
-        why = out.get("handoff_reason") or "hand-off"
-    elif d.urgent:
-        why = "legal"
-    else:
-        return d
-    return Decision(HANDOFF, d.urgent, d.source, d.confidence, f"{names[d.folder]} -> {why}: {d.reason}",
-                    d.phishing, d.suggested or d.folder, d.model)
 
 
 def loop(cfg: dict, run=None, sleep=time.sleep, cycles: int | None = None) -> None:

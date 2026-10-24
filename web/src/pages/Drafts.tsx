@@ -1,4 +1,5 @@
-// Rascunhos: reply drafts waiting for approval, oldest first, filtered by category when there are two or more.
+// Por responder: a reply draft for every open email, in one section per category (folder order), oldest
+// customer email first inside each; the chips show one category at a time.
 import { useRef, useState } from "react";
 import { ApiError, request } from "../api";
 import DraftCard, { type DraftForm } from "../components/DraftCard";
@@ -17,9 +18,9 @@ export default function Drafts() {
   const hold = useRef(false);
   const { data, error, reload } = useAppState(hold);
 
-  const drafts = data?.drafts ?? [];
+  const drafts = [...(data?.drafts ?? [])].sort((a, b) => a.sort.localeCompare(b.sort));
   const live = new Set(drafts.map((d) => d.id));
-  // the poll waits while a card here has an open box, an armed Enviar or a running action (drafts gone don't count)
+  // the poll waits while a card here has an open box, an armed button or a running action (drafts gone don't count)
   hold.current = Object.entries(forms).some(([id, f]) => f && live.has(id))
     || Object.entries(armed).some(([id, a]) => a && live.has(id))
     || Object.keys(busy).some((id) => live.has(id));
@@ -43,22 +44,22 @@ export default function Drafts() {
     setBusy(({ [d.id]: _, ...rest }) => rest);
   }
 
-  const counts = new Map<string, number>();
-  for (const d of drafts) counts.set(d.folder, (counts.get(d.folder) ?? 0) + 1);
-  const folders = [...counts.keys()].sort((a, b) => a.localeCompare(b, "pt-PT", { numeric: true }));
-  const current = folders.length >= 2 && counts.has(folder) ? folder : "";
-  const shown = current ? drafts.filter((d) => d.folder === current) : drafts;
+  const groups = new Map<string, Draft[]>();
+  for (const d of drafts) groups.set(d.folder, [...(groups.get(d.folder) ?? []), d]);
+  const folders = [...groups.keys()].sort((a, b) => a.localeCompare(b, "pt-PT", { numeric: true }));
+  const current = groups.has(folder) ? folder : "";
+  const shown = current ? [current] : folders;
 
   return (
     <div className="page">
       <Toolbar data={data} error={error}>
-        {folders.length >= 2 && <div className="chips" role="group" aria-label="Categoria">
+        {data && <div className="chips" role="group" aria-label="Categoria">
           <button type="button" className="chip-btn" aria-pressed={current === ""} onClick={() => setFolder("")}>
             Todas <span className="chip-count">{drafts.length}</span>
           </button>
           {folders.map((f) => (
             <button key={f} type="button" className="chip-btn" aria-pressed={current === f} onClick={() => setFolder(f)}>
-              {f} <span className="chip-count">{counts.get(f)}</span>
+              {f} <span className="chip-count">{groups.get(f)?.length}</span>
             </button>
           ))}
         </div>}
@@ -68,26 +69,33 @@ export default function Drafts() {
         {data && (
           <p className="page-hint">
             <b>Enviar</b> manda a resposta ao cliente a partir de {data.mailbox}. <b>Pedir alteração</b> reescreve-a
-            com as suas indicações. <b>Respondo eu</b> passa o email para Por Responder.
+            com as suas indicações e <b>Editar</b> deixa-o escrevê-la. <b>Tratado sem resposta</b> fecha o email sem
+            enviar nada.
           </p>
         )}
-        {data && shown.length === 0 && (
+        {data && drafts.length === 0 && (
           <div className="empty">
-            <p className="empty-title">Não há rascunhos por aprovar.</p>
+            <p className="empty-title">Não há emails por responder.</p>
             <p className="muted">Os novos aparecem aqui assim que o correio chega.</p>
           </div>
         )}
-        <div className="card-list">
-          {shown.map((d) => (
-            <DraftCard key={d.id} draft={d} busy={busy[d.id] ?? ""} form={forms[d.id] ?? null}
-              onForm={(f) => setForm(d.id, f)}
-              onArmed={(a) => setArmed((all) => ({ ...all, [d.id]: a }))}
-              onSend={() => void act(d, "send", {}, "A enviar…")}
-              onRewrite={(comment) => void act(d, "rewrite", { comment }, "A reescrever… pode demorar até um minuto.")}
-              onEdit={(text) => void act(d, "edit", { body: text }, "A guardar…")}
-              onPerson={() => void act(d, "person", {}, "A passar para Por Responder…")} />
-          ))}
-        </div>
+        {shown.map((f) => (
+          <section key={f} className="topic" aria-label={f}>
+            <h2 className="section-title">{f} <span className="section-count">{groups.get(f)?.length}</span></h2>
+            <div className="card-list">
+              {(groups.get(f) ?? []).map((d) => (
+                <DraftCard key={d.id} draft={d} busy={busy[d.id] ?? ""} form={forms[d.id] ?? null}
+                  onForm={(next) => setForm(d.id, next)}
+                  onArmed={(a) => setArmed((all) => ({ ...all, [d.id]: a }))}
+                  onSend={() => void act(d, "send", {}, "A enviar…")}
+                  onRewrite={(comment) => void act(d, "rewrite", { comment }, "A reescrever… pode demorar até um minuto.")}
+                  onEdit={(text) => void act(d, "edit", { body: text }, "A guardar…")}
+                  onDone={() => void act(d, "answered", {}, "A fechar…")}
+                  onTo={(to) => void act(d, "to", { to }, "A guardar…")} />
+              ))}
+            </div>
+          </section>
+        ))}
       </PageStatus>
     </div>
   );
